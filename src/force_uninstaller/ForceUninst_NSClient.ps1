@@ -60,7 +60,7 @@ Import-Module $PSScriptRoot\ForceUninst_Lib.psm1 -Force     #psm1 module file sh
 [string] $NS_SVC_STADRV = "stadrv"
 [string] $NS_SVC_EPDLPSVC = "epdlp"
 [string] $NS_SVC_EPDLPDRV = "epdlpdrv"
-
+[string] $NS_INSTDIR_KEYWORD = "Netskope"
 
 #Kill StagentSvc and StagntUI processes before stop stadrv driver service
 KillProcesses -ProcessNames @($NS_PROCESS_SVC, $NS_PROCESS_UI, $NS_SVC_EPDLPSVC)
@@ -97,7 +97,7 @@ Write-Host "Product Registry Key=$ProductReg, Product Code=$ProductCode"
 $RegKeysToRemove += $ProductReg
 
 Write-Host "Scanning MSI Install Folders Registry Values"
-SearchRegistryValuesByRegex -Path $REG_MSI_INSTALL_FOLDERS_KEY -SearchRegex $keyword | 
+SearchRegistryValuesByRegex -Path $REG_MSI_INSTALL_FOLDERS_KEY -SearchRegex $NS_INSTDIR_KEYWORD | 
     ForEach-Object {
         $item = $_
         if([string]::IsNullOrEmpty($item)){
