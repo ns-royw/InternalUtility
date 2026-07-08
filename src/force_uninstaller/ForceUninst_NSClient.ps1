@@ -28,6 +28,8 @@
 #[NOTE]this switch should be first line of this script file.
 param(
     [switch] $Verbose
+    [switch] $Debug
+    [switch] $WhatIf
 )
 if ($Verbose) { 
     $Global:VerbosePreference = 'Continue'

@@ -83,12 +83,13 @@ function Get-FolderOwnership{
     )
     $currentUser = "$env:USERDOMAIN\$env:USERNAME"
     Write-Verbose "Taking ownership of: $Fullpath"
-    try {
-        takeown /F "$Fullpath" /R /D Y | Out-Null
+
+    takeown /F "$Fullpath" /R /D Y | Out-Null
+    if ($LASTEXITCODE -eq 0) {
         Write-Host "Ownership taken successfully via takeown.exe." -ForegroundColor Green
         return $true
     }
-    catch {
+    else {
         Write-Verbose "takeown.exe failed. Trying Set-Acl method..."
         try {
             $owner = New-Object System.Security.Principal.NTAccount($currentUser)
@@ -99,10 +100,11 @@ function Get-FolderOwnership{
             return $true
         }
         catch {
-            Write-Host "Failed to take ownership of $Path" -ForegroundColor Red
+            Write-Host "Failed to take ownership of $Fullpath" -ForegroundColor Red
             Write-Host $_.Exception.Message -ForegroundColor DarkRed
         }
     }
+
     return $false
 }
 function Grant-FolderFullControl() {
@@ -147,8 +149,8 @@ function Grant-FolderFullControl() {
 			}
 		}
 		catch {
-			Write-Error "Error applying ACLs to: $FolderPath" -ForegroundColor Red
-			Write-Error $_.Exception.Message -ForegroundColor DarkRed
+			Write-Error "Error applying ACLs to: $FolderPath"
+			Write-Error $_.Exception.Message
 		}
 	}
 	else{
@@ -215,7 +217,7 @@ function SearchMsiProductReg {
     $regpath = ToPSDriveFormat($REG_MSI_PRODUCT_KEY)
     #Normally we shouldn't get an empty string here, but let's check it just to be safe.
     if([string]::IsNullOrEmpty($regpath)) {
-        Write-Warn "Failed to convert registry path to PSDrive format: $REG_MSI_PRODUCT_KEY"
+        Write-Warning "Failed to convert registry path to PSDrive format: $REG_MSI_PRODUCT_KEY"
         return ""
     }
     $found = Get-Childitem -path $regpath | SELECT *
@@ -540,7 +542,7 @@ function RemoveAppStartupRun {
     Write-Host "Remove App [$Name] in Startup Run Registry starting..."
 
     foreach($path in $REG_STARTUP_RUN){
-        Write-Verbose "Removing Startup Run value [$Name] under [$pspath]"
+        Write-Verbose "Removing Startup Run value [$Name] under [$path]"
         RemoveRegistryValue -Path $path -ValueName $Name
     }
 }
@@ -568,18 +570,18 @@ function RemoveMSIRegistryForApp {
 
     #2. Search Components by ProductKey
     if(![string]::IsNullOrEmpty($product_code)) {
-        $components = SearchMsiComponentByProduct -ProductKey "$product_code"
+        $components = SearchMsiComponentByProduct -ProductCode "$product_code"
     }
     #3. Search UpgradeCode by ProductKey
     if(![string]::IsNullOrEmpty($product_code)) {
-        $upg_code = SearchUpgradeCodeByProduct -ProductKey "$product_code"
+        $upg_code = SearchUpgradeCodeByProduct -ProductCode "$product_code"
     }
     #4. Search Feature Tree by ProductKey
     if(![string]::IsNullOrEmpty($product_code)) {
-        $feature_tree = SearchFeatureTreeByProduct -ProductKey "$product_code"
+        $feature_tree = SearchFeatureTreeByProduct -ProductCode "$product_code"
     }
     #5. Search InstallClassKey by ProductName
-    $inst_class = SearchMsiInstClassProductKey -ProductName "$ProductName"
+    $inst_class = SearchMsiInstClassProductCode -ProductName "$ProductName"
     #6. Search Uninstall Keys by Product DisplayName
     $uninst_keys = SearchMsiUninstKeyByProduct -DisplayName "$DisplayName"
 
@@ -730,6 +732,7 @@ function SearchRegistryValuesByRegex {
     } 
 
     process { 
+        $ret = @()
         foreach($CurrentPath in $Path) {
             Write-Verbose ("Searching in path: {0}" -f $CurrentPath)
             $pspath = ToPSDriveFormat($CurrentPath)
