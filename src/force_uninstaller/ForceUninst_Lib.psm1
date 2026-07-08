@@ -8,7 +8,7 @@
 #
 # Release History:
 # R0.7: 2025/Oct Roy Wang. first version
-# R0.8: 2026/Jul Roy Wang. bug fix
+# R0.8: 2026/Jul Roy Wang. bug fixing and refactoring
 
 #special notes:
 #"product key" is a special order of GUID reprentation used by MSI installer internally.
@@ -140,8 +140,12 @@ function Grant-FolderFullControl() {
 	if(Test-Path $FolderPath)
 	{
 		try {
-			Get-FolderOwnership $FolderPath
+			$got_owner = Get-FolderOwnership $FolderPath
 
+            if(!$got_owner) {
+                Write-Error "Failed to take ownership of $FolderPath. Cannot apply FullControl."
+                return $false
+            }
 			$acl = Get-Acl $FolderPath
 			$acl.SetAccessRuleProtection($false, $false)  # disable inherited ACL protection if needed
 			$acl.AddAccessRule($rule)
@@ -155,8 +159,10 @@ function Grant-FolderFullControl() {
 					Set-Acl -Path $_.FullName -AclObject $acl
 				}
 				catch {
-					  }
+                    Write-Host "$($_.FullName): Failed to apply FullControl. Error: $($_.Exception.Message)" -ForegroundColor Red
+                }
 			}
+            return $true
 		}
 		catch {
 			Write-Error "Error applying ACLs to: $FolderPath"
@@ -166,6 +172,7 @@ function Grant-FolderFullControl() {
 	else{
 		Write-Host "$FolderPath Doesn't exist"
 	}
+    return $false
 }
 function EnableProcessTokenPrivilege {
     [CmdletBinding()]
@@ -698,7 +705,7 @@ function SearchRegistryKeysByRegex {
 
                     if ($ValueNameRegex) {  
                         if ($Key.GetValueNames() -match $ValueNameRegex) {  
-                            Write-Verbose ("{0}: has value names matched ValueNameRegex" -f $Key)  
+                            Write-Verbose ("{0}: has value name matched ValueNameRegex" -f $Key)  
                             $counter++
                             return [string] $Key
                         }  
@@ -739,10 +746,10 @@ function SearchRegistryValuesByRegex {
     begin { 
         Write-Host "SearchRegistryValuesByRegex=> Path[$Path]"
         Write-Verbose "SearchRegex=$SearchRegex"
+        $counter = 0
     } 
 
     process { 
-        $ret = @()
         foreach($CurrentPath in $Path) {
             Write-Verbose ("Searching in path: {0}" -f $CurrentPath)
             $pspath = ToPSDriveFormat($CurrentPath)
@@ -755,13 +762,14 @@ function SearchRegistryValuesByRegex {
                 ForEach-Object {   
                     $item = $_ 
                     $ret = ($item.PSObject.Properties | Where-Object {
-                            $_.Name -match $SearchRegex -or $_.Value -match $SearchRegex }).Name
+                        $_.Name -match $SearchRegex -or $_.Value -match $SearchRegex }).Name
+                    $counter++
                     return $ret
                 } 
         }
     } 
     end{
-        Write-Host "Total matched values: $($ret.Count)"
+        Write-Host "Total matched values: $counter"
     }
 }
 
