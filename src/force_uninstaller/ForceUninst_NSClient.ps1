@@ -1,5 +1,5 @@
 #Force Remove NSClient utility
-#Author: Roy Wang , 2025/Oct Netskope Inc.
+#Author: Roy Wang , 2025 Netskope Inc.
 #
 #This script came from ENG-735239. Customer can't uninstall NSClient, used 3rd Party Tool to remove it.
 #Support need a power shell script to resolve similar issue.
@@ -9,9 +9,8 @@
 #   note: also put ForceUninst_Lib.psm1 module file in the same folder.
 #2. Open PowerShell as Administrator!
 #3. Run the script:
-#   Set-ExecutionPolicy Bypass -Scope Process -Force; .\ForceUninst_NSClient.ps1
-#   or you can open a command prompt as admin, and run:
 #   powershell -ExecutionPolicy Bypass -File C:\Temp\ForceUninst_NSClient.ps1
+#
 #[What this script will do]
 #1. Kill NSClient processes: stAgentSvc.exe, stAgentUI.exe
 #2. Stop and delete NSClient services: stAgentSvc, stadrv
@@ -23,13 +22,18 @@
 #[Limitation]
 #1. If SelfProtection is enabled, this script may not work. User have to disable SelfProtection first.
 #2. This script only support Windows PowerShell 5.0 and above. (Win10 has built-in PS v5.1)
+#3. When SelfProtection is enabled, executing this script twice could cause some errors.
+
+# Release History:
+# R0.7: 2025/Oct Roy Wang. first version
+# R0.8: 2026/Jul Roy Wang. bug fix
+
 
 #handle "-Verbose" parameter of script execution.
 #[NOTE]this switch should be first line of this script file.
 param(
-    [switch] $Verbose
-    [switch] $Debug
-    [switch] $WhatIf
+    [switch] $Verbose,
+    [switch] $DryRun
 )
 if ($Verbose) { 
     $Global:VerbosePreference = 'Continue'

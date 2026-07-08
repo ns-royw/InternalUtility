@@ -1,5 +1,15 @@
 #Requires -RunAsAdministrator
 
+#Release Notes
+# Author: Roy Wang , 2025/Oct Netskope Inc.
+# This script provides MSI-related registry handling and app uninstall functions. 
+# Its main purpose is to force-remove apps that have broken MSI information. 
+# Before using this script, you must check that it has a Netskope signature.
+#
+# Release History:
+# R0.7: 2025/Oct Roy Wang. first version
+# R0.8: 2026/Jul Roy Wang. bug fix
+
 #special notes:
 #"product key" is a special order of GUID reprentation used by MSI installer internally.
 #for example: 
@@ -8,7 +18,7 @@
 # Product key in registry => B7483AA3 285C FA84 EACC D2B9508D5754
 #
 
-[string] $REGEX_PRODUCT_KEY = "([0-9A-Fa-f]{32})"   #EXAMPLE: 7B7C5F31CED5DDDFD7E984F495D8F0BB
+[string] $REGEX_PRODUCT_KEY = "([0-9A-Fa-f]{32})"   #hex string, EXAMPLE: 7B7C5F31CED5DDDFD7E984F495D8F0BB
 [string] $REG_MSI_PRODUCT_KEY = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products"
 [string] $REG_MSI_COMPONENTS_KEY = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Components"
 [string] $REG_MSI_UPGRADE_KEY = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UpgradeCodes"
