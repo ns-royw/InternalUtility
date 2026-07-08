@@ -1,5 +1,15 @@
 #Requires -RunAsAdministrator
 
+#Release Notes
+# Author: Roy Wang , 2025/Oct Netskope Inc.
+# This script provides MSI-related registry handling and app uninstall functions. 
+# Its main purpose is to force-remove apps that have broken MSI information. 
+# Before using this script, you must check that it has a Netskope signature.
+#
+# Release History:
+# R0.7: 2025/Oct Roy Wang. first version
+# R0.8: 2026/Jul Roy Wang. bug fixing and refactoring
+
 #special notes:
 #"product key" is a special order of GUID reprentation used by MSI installer internally.
 #for example: 
@@ -8,7 +18,7 @@
 # Product key in registry => B7483AA3 285C FA84 EACC D2B9508D5754
 #
 
-[string] $REGEX_PRODUCT_KEY = "([0-9A-Fa-f]{32})"   #EXAMPLE: 7B7C5F31CED5DDDFD7E984F495D8F0BB
+[string] $REGEX_PRODUCT_KEY = "([0-9A-Fa-f]{32})"   #hex string, EXAMPLE: 7B7C5F31CED5DDDFD7E984F495D8F0BB
 [string] $REG_MSI_PRODUCT_KEY = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products"
 [string] $REG_MSI_COMPONENTS_KEY = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Components"
 [string] $REG_MSI_UPGRADE_KEY = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UpgradeCodes"
@@ -83,12 +93,13 @@ function Get-FolderOwnership{
     )
     $currentUser = "$env:USERDOMAIN\$env:USERNAME"
     Write-Verbose "Taking ownership of: $Fullpath"
-    try {
-        takeown /F "$Fullpath" /R /D Y | Out-Null
+
+    takeown /F "$Fullpath" /R /D Y | Out-Null
+    if ($LASTEXITCODE -eq 0) {
         Write-Host "Ownership taken successfully via takeown.exe." -ForegroundColor Green
         return $true
     }
-    catch {
+    else {
         Write-Verbose "takeown.exe failed. Trying Set-Acl method..."
         try {
             $owner = New-Object System.Security.Principal.NTAccount($currentUser)
@@ -99,10 +110,11 @@ function Get-FolderOwnership{
             return $true
         }
         catch {
-            Write-Host "Failed to take ownership of $Path" -ForegroundColor Red
+            Write-Host "Failed to take ownership of $Fullpath" -ForegroundColor Red
             Write-Host $_.Exception.Message -ForegroundColor DarkRed
         }
     }
+
     return $false
 }
 function Grant-FolderFullControl() {
@@ -128,8 +140,12 @@ function Grant-FolderFullControl() {
 	if(Test-Path $FolderPath)
 	{
 		try {
-			Get-FolderOwnership $FolderPath
+			$got_owner = Get-FolderOwnership $FolderPath
 
+            if(!$got_owner) {
+                Write-Error "Failed to take ownership of $FolderPath. Cannot apply FullControl."
+                return $false
+            }
 			$acl = Get-Acl $FolderPath
 			$acl.SetAccessRuleProtection($false, $false)  # disable inherited ACL protection if needed
 			$acl.AddAccessRule($rule)
@@ -143,17 +159,20 @@ function Grant-FolderFullControl() {
 					Set-Acl -Path $_.FullName -AclObject $acl
 				}
 				catch {
-					  }
+                    Write-Host "$($_.FullName): Failed to apply FullControl. Error: $($_.Exception.Message)" -ForegroundColor Red
+                }
 			}
+            return $true
 		}
 		catch {
-			Write-Error "Error applying ACLs to: $FolderPath" -ForegroundColor Red
-			Write-Error $_.Exception.Message -ForegroundColor DarkRed
+			Write-Error "Error applying ACLs to: $FolderPath"
+			Write-Error $_.Exception.Message
 		}
 	}
 	else{
 		Write-Host "$FolderPath Doesn't exist"
 	}
+    return $false
 }
 function EnableProcessTokenPrivilege {
     [CmdletBinding()]
@@ -184,24 +203,34 @@ function EnableProcessTokenPrivilege {
     internal const int SE_PRIVILEGE_ENABLED = 0x00000002;
     internal const int TOKEN_QUERY = 0x00000008;
     internal const int TOKEN_ADJUST_PRIVILEGES = 0x00000020;
-    public static void Enable(string privilege) {
+    public static bool Enable(string privilege) {
         IntPtr htoken = IntPtr.Zero;
-        OpenProcessToken(System.Diagnostics.Process.GetCurrentProcess().Handle,
+        bool ok1 = OpenProcessToken(System.Diagnostics.Process.GetCurrentProcess().Handle,
             TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ref htoken);
         TOKEN_PRIVILEGES tp;
         tp.Count = 1;
         tp.Luid = 0;
         tp.Attr = SE_PRIVILEGE_ENABLED;
-        LookupPrivilegeValue(null, privilege, ref tp.Luid);
-        AdjustTokenPrivileges(htoken, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
+        bool ok2 = LookupPrivilegeValue(null, privilege, ref tp.Luid);
+        bool ok3 = AdjustTokenPrivileges(htoken, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
+        return ok1 && ok2 && ok3;
     }
 }
 "@
     Add-Type $definition #-ErrorAction SilentlyContinue
 # Enable necessary privileges
-    [PrivilegeHelper]::Enable("SeTakeOwnershipPrivilege")
-    [PrivilegeHelper]::Enable("SeRestorePrivilege")
-    [PrivilegeHelper]::Enable("SeBackupPrivilege")
+    $action_ok = [PrivilegeHelper]::Enable("SeTakeOwnershipPrivilege")
+    if(!$action_ok) {
+        Write-Warning "Failed to enable SeTakeOwnershipPrivilege"
+    }
+    $action_ok = [PrivilegeHelper]::Enable("SeRestorePrivilege")
+    if(!$action_ok) {
+        Write-Warning "Failed to enable SeRestorePrivilege"
+    }
+    $action_ok = [PrivilegeHelper]::Enable("SeBackupPrivilege")
+    if(!$action_ok) {
+        Write-Warning "Failed to enable SeBackupPrivilege"
+    }
 }
 function SearchMsiProductReg {
     [CmdletBinding()]
@@ -215,7 +244,7 @@ function SearchMsiProductReg {
     $regpath = ToPSDriveFormat($REG_MSI_PRODUCT_KEY)
     #Normally we shouldn't get an empty string here, but let's check it just to be safe.
     if([string]::IsNullOrEmpty($regpath)) {
-        Write-Warn "Failed to convert registry path to PSDrive format: $REG_MSI_PRODUCT_KEY"
+        Write-Warning "Failed to convert registry path to PSDrive format: $REG_MSI_PRODUCT_KEY"
         return ""
     }
     $found = Get-Childitem -path $regpath | SELECT *
@@ -540,7 +569,7 @@ function RemoveAppStartupRun {
     Write-Host "Remove App [$Name] in Startup Run Registry starting..."
 
     foreach($path in $REG_STARTUP_RUN){
-        Write-Verbose "Removing Startup Run value [$Name] under [$pspath]"
+        Write-Verbose "Removing Startup Run value [$Name] under [$path]"
         RemoveRegistryValue -Path $path -ValueName $Name
     }
 }
@@ -568,18 +597,18 @@ function RemoveMSIRegistryForApp {
 
     #2. Search Components by ProductKey
     if(![string]::IsNullOrEmpty($product_code)) {
-        $components = SearchMsiComponentByProduct -ProductKey "$product_code"
+        $components = SearchMsiComponentByProduct -ProductCode "$product_code"
     }
     #3. Search UpgradeCode by ProductKey
     if(![string]::IsNullOrEmpty($product_code)) {
-        $upg_code = SearchUpgradeCodeByProduct -ProductKey "$product_code"
+        $upg_code = SearchUpgradeCodeByProduct -ProductCode "$product_code"
     }
     #4. Search Feature Tree by ProductKey
     if(![string]::IsNullOrEmpty($product_code)) {
-        $feature_tree = SearchFeatureTreeByProduct -ProductKey "$product_code"
+        $feature_tree = SearchFeatureTreeByProduct -ProductCode "$product_code"
     }
     #5. Search InstallClassKey by ProductName
-    $inst_class = SearchMsiInstClassProductKey -ProductName "$ProductName"
+    $inst_class = SearchMsiInstClassProductCode -ProductName "$ProductName"
     #6. Search Uninstall Keys by Product DisplayName
     $uninst_keys = SearchMsiUninstKeyByProduct -DisplayName "$DisplayName"
 
@@ -609,7 +638,7 @@ function RemoveMSIRegistryForApp {
     }
     Write-Host "CleanupMSIRegistry for Product [$DisplayName] done."
 }
-# Search registry keys by regex in key names, value names, and/or value data.
+# Search registry keys by regex in key names, value names, and value data.
 # If no switches are specified, all three (key names, value names, and value data) will be searched.
 # returns matching registry key paths as strings.
 #Note: this function only search 1 level of registry keys under the specified path(s).
@@ -637,7 +666,7 @@ function SearchRegistryKeysByRegex {
         [switch] $ValueData, 
         [Parameter(ParameterSetName="MultipleSearchStrings")] 
         # Specifies a regex that will be checked against key names only 
-        [string] $KeyNameRegex, 
+        [string] $KeyNameRegex,
         [Parameter(ParameterSetName="MultipleSearchStrings")] 
         # Specifies a regex that will be checked against value names only 
         [string] $ValueNameRegex, 
@@ -658,19 +687,22 @@ function SearchRegistryKeysByRegex {
                 # No extra work needed 
             } 
         }
-        Write-Host "SearchRegistryKeysByRegex=> Path[$Path]"
+        Write-Host "SearchRegistryKeysByRegex=> Path:"
+        foreach ($CurrentPath in $Path) { 
+            Write-Host "  [$CurrentPath]"
+        }
         Write-Verbose "SearchRegex=$SearchRegex, KeyNameRegex=$KeyNameRegex, ValueNameRegex=$ValueNameRegex, ValueDataRegex=$ValueDataRegex"
         $counter = 0
     } 
 
     process { 
         foreach ($CurrentPath in $Path) { 
-            Write-Verbose ("Searching in path: {0}" -f $CurrentPath)
             $pspath = ToPSDriveFormat($CurrentPath)
             #Normally we shouldn't get an empty string here, but let's check it just to be safe.
             if([string]::IsNullOrEmpty($pspath)) {
                 continue
             }
+            Write-Verbose ("=>{0}" -f $pspath)
 
             Get-ChildItem -Path "$pspath" -Recurse:$Recursive |  
                 ForEach-Object { 
@@ -684,21 +716,27 @@ function SearchRegistryKeysByRegex {
                         }  
                     } 
 
-                    if ($ValueNameRegex) {  
-                        if ($Key.GetValueNames() -match $ValueNameRegex) {  
-                            Write-Verbose ("{0}: has value names matched ValueNameRegex" -f $Key)  
+                    if ($ValueNameRegex) {
+                        $matchedNames = $Key.GetValueNames() | Where-Object { $_ -match $ValueNameRegex }
+                        if ($matchedNames) {
+                            foreach ($vname in $matchedNames) {
+                                Write-Verbose ("{0}: matched ValueNameRegex, {1} = {2}" -f $Key, $vname, $Key.GetValue($vname))
+                            }
                             $counter++
                             return [string] $Key
-                        }  
-                    } 
+                        }
+                    }
 
-                    if ($ValueDataRegex) {  
-                        if (($Key.GetValueNames() | % { $Key.GetValue($_) }) -match $ValueDataRegex) {  
-                            Write-Verbose ("{0}: value matched ValueDataRegex" -f $Key)
+                    if ($ValueDataRegex) {
+                        $matchedNames = $Key.GetValueNames() | Where-Object { $Key.GetValue($_) -match $ValueDataRegex }
+                        if ($matchedNames) {
+                            foreach ($vname in $matchedNames) {
+                                Write-Verbose ("{0}: matched ValueDataRegex, {1} = {2}" -f $Key, $vname, $Key.GetValue($vname))
+                            }
                             $counter++
                             return [string] $Key
-                        } 
-                    } 
+                        }
+                    }
                 } 
         } 
     } 
@@ -708,47 +746,81 @@ function SearchRegistryKeysByRegex {
     }
 }
 
-# Search registry keys by regex in value names, and/or value data.
+# Search registry keys by regex in value names, and value data.
 # If no switches are specified, all two (value names, and value data) will be searched.
 # returns matching value name as strings.
-function SearchRegistryValuesByRegex { 
+function SearchRegistryValueNamesByRegex { 
     [CmdletBinding()] 
     [OutputType([string[]])]
     param( 
         [Parameter(Mandatory, Position=0, ValueFromPipelineByPropertyName)] 
-        [Alias("PsPath")] 
         # Registry path to search 
         [string[]] $Path, 
-        # A regular expression that will be checked against key names, value names, and value data.
+        # A regular expression that will be checked against value names, and value data.
         # this argument also can be a keyword.
         [string] $SearchRegex
     ) 
 
     begin { 
-        Write-Host "SearchRegistryValuesByRegex=> Path[$Path]"
+        Write-Host "SearchRegistryValueNamesByRegex=> Path[$Path]"
         Write-Verbose "SearchRegex=$SearchRegex"
+        $counter = 0
     } 
 
     process { 
-        foreach($CurrentPath in $Path) {
-            Write-Verbose ("Searching in path: {0}" -f $CurrentPath)
-            $pspath = ToPSDriveFormat($CurrentPath)
-            #Normally we shouldn't get an empty string here, but let's check it just to be safe.
-            if([string]::IsNullOrEmpty($pspath)) {
-                continue
-            }
+            foreach ($CurrentPath in $Path) {
+                if ([string]::IsNullOrEmpty($CurrentPath)) {
+                    Write-Warning "CurrentPath is empty, skipping..."
+                    continue
+                }
 
-            Get-ItemProperty -Path $pspath | 
-                ForEach-Object {   
-                    $item = $_ 
-                    $ret = ($item.PSObject.Properties | Where-Object {
-                            $_.Name -match $SearchRegex -or $_.Value -match $SearchRegex }).Name
-                    return $ret
-                } 
-        }
+                $pspath = ToPSDriveFormat($CurrentPath)
+                $key = Get-Item -Path "$pspath" -ErrorAction SilentlyContinue
+                if (!$key) {
+                    Write-Warning "Failed to get registry key for path: $CurrentPath"
+                    continue
+                }
+                $key.GetValueNames() | ForEach-Object {
+                    $vname = $_
+                    $vdata = $key.GetValue($vname)
+                    if($vname -match $SearchRegex -or $vdata -match $SearchRegex) {
+                        Write-Verbose ("found {0}={1} matched" -f $vname, $vdata)
+                        $counter++
+                        return [string] $vname
+                    }
+                }
+            }
     } 
     end{
-        Write-Host "Total matched values: $($ret.Count)"
+        Write-Host "Total matched values: $counter"
+    }
+}
+
+# Get all child values (value names and value data) under a specified registry key.
+# Note: only search specified registry key path, no searching subkeys.
+function DoesRegistryKeyHasOnlyOneValue {
+    [CmdletBinding()] 
+    [OutputType([bool])]
+    param( 
+        [Parameter(Mandatory, Position=0, ValueFromPipelineByPropertyName)] 
+        # Registry path to search 
+        [string] $Path
+    ) 
+    begin { 
+        Write-Host "DoesRegistryKeyHasOnlyOneValue=> Path[$Path]"
+        $counter = 0
+    } 
+    process { 
+        $pspath = ToPSDriveFormat($Path)
+        $key = Get-Item -Path "$pspath" -ErrorAction SilentlyContinue
+        if (!$key) {
+            Write-Warning "Failed to get registry key for path: $Path"
+            return $false
+        }
+        return $key.GetValueNames().Count -eq 1
+    }
+
+    end{
     }
 }
 

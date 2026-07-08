@@ -1,5 +1,11 @@
 #Requires -RunAsAdministrator
 
+#Release Notes
+# Author: Roy Wang , 2025/Oct Netskope Inc.
+# This script provides MSI-related registry handling and app uninstall functions. 
+# Its main purpose is to force-remove apps that have broken MSI information. 
+# Before using this script, you must check that it has a Netskope signature.
+
 #special notes:
 #"product key" is a special order of GUID reprentation used by MSI installer internally.
 #for example: 
@@ -8,7 +14,7 @@
 # Product key in registry => B7483AA3 285C FA84 EACC D2B9508D5754
 #
 
-[string] $REGEX_PRODUCT_KEY = "([0-9A-Fa-f]{32})"   #EXAMPLE: 7B7C5F31CED5DDDFD7E984F495D8F0BB
+[string] $REGEX_PRODUCT_KEY = "([0-9A-Fa-f]{32})"   #hex string, EXAMPLE: 7B7C5F31CED5DDDFD7E984F495D8F0BB
 [string] $REG_MSI_PRODUCT_KEY = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products"
 [string] $REG_MSI_COMPONENTS_KEY = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Components"
 [string] $REG_MSI_UPGRADE_KEY = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UpgradeCodes"
@@ -83,12 +89,13 @@ function Get-FolderOwnership{
     )
     $currentUser = "$env:USERDOMAIN\$env:USERNAME"
     Write-Verbose "Taking ownership of: $Fullpath"
-    try {
-        takeown /F "$Fullpath" /R /D Y | Out-Null
+
+    takeown /F "$Fullpath" /R /D Y | Out-Null
+    if ($LASTEXITCODE -eq 0) {
         Write-Host "Ownership taken successfully via takeown.exe." -ForegroundColor Green
         return $true
     }
-    catch {
+    else {
         Write-Verbose "takeown.exe failed. Trying Set-Acl method..."
         try {
             $owner = New-Object System.Security.Principal.NTAccount($currentUser)
@@ -99,10 +106,11 @@ function Get-FolderOwnership{
             return $true
         }
         catch {
-            Write-Host "Failed to take ownership of $Path" -ForegroundColor Red
+            Write-Host "Failed to take ownership of $Fullpath" -ForegroundColor Red
             Write-Host $_.Exception.Message -ForegroundColor DarkRed
         }
     }
+
     return $false
 }
 function Grant-FolderFullControl() {
@@ -128,8 +136,12 @@ function Grant-FolderFullControl() {
 	if(Test-Path $FolderPath)
 	{
 		try {
-			Get-FolderOwnership $FolderPath
+			$got_owner = Get-FolderOwnership $FolderPath
 
+            if(!$got_owner) {
+                Write-Error "Failed to take ownership of $FolderPath. Cannot apply FullControl."
+                return $false
+            }
 			$acl = Get-Acl $FolderPath
 			$acl.SetAccessRuleProtection($false, $false)  # disable inherited ACL protection if needed
 			$acl.AddAccessRule($rule)
@@ -143,17 +155,20 @@ function Grant-FolderFullControl() {
 					Set-Acl -Path $_.FullName -AclObject $acl
 				}
 				catch {
-					  }
+                    Write-Host "$($_.FullName): Failed to apply FullControl. Error: $($_.Exception.Message)" -ForegroundColor Red
+                }
 			}
+            return $true
 		}
 		catch {
-			Write-Error "Error applying ACLs to: $FolderPath" -ForegroundColor Red
-			Write-Error $_.Exception.Message -ForegroundColor DarkRed
+			Write-Error "Error applying ACLs to: $FolderPath"
+			Write-Error $_.Exception.Message
 		}
 	}
 	else{
 		Write-Host "$FolderPath Doesn't exist"
 	}
+    return $false
 }
 function EnableProcessTokenPrivilege {
     [CmdletBinding()]
@@ -215,7 +230,7 @@ function SearchMsiProductReg {
     $regpath = ToPSDriveFormat($REG_MSI_PRODUCT_KEY)
     #Normally we shouldn't get an empty string here, but let's check it just to be safe.
     if([string]::IsNullOrEmpty($regpath)) {
-        Write-Warn "Failed to convert registry path to PSDrive format: $REG_MSI_PRODUCT_KEY"
+        Write-Warning "Failed to convert registry path to PSDrive format: $REG_MSI_PRODUCT_KEY"
         return ""
     }
     $found = Get-Childitem -path $regpath | SELECT *
@@ -540,7 +555,7 @@ function RemoveAppStartupRun {
     Write-Host "Remove App [$Name] in Startup Run Registry starting..."
 
     foreach($path in $REG_STARTUP_RUN){
-        Write-Verbose "Removing Startup Run value [$Name] under [$pspath]"
+        Write-Verbose "Removing Startup Run value [$Name] under [$path]"
         RemoveRegistryValue -Path $path -ValueName $Name
     }
 }
@@ -568,18 +583,18 @@ function RemoveMSIRegistryForApp {
 
     #2. Search Components by ProductKey
     if(![string]::IsNullOrEmpty($product_code)) {
-        $components = SearchMsiComponentByProduct -ProductKey "$product_code"
+        $components = SearchMsiComponentByProduct -ProductCode "$product_code"
     }
     #3. Search UpgradeCode by ProductKey
     if(![string]::IsNullOrEmpty($product_code)) {
-        $upg_code = SearchUpgradeCodeByProduct -ProductKey "$product_code"
+        $upg_code = SearchUpgradeCodeByProduct -ProductCode "$product_code"
     }
     #4. Search Feature Tree by ProductKey
     if(![string]::IsNullOrEmpty($product_code)) {
-        $feature_tree = SearchFeatureTreeByProduct -ProductKey "$product_code"
+        $feature_tree = SearchFeatureTreeByProduct -ProductCode "$product_code"
     }
     #5. Search InstallClassKey by ProductName
-    $inst_class = SearchMsiInstClassProductKey -ProductName "$ProductName"
+    $inst_class = SearchMsiInstClassProductCode -ProductName "$ProductName"
     #6. Search Uninstall Keys by Product DisplayName
     $uninst_keys = SearchMsiUninstKeyByProduct -DisplayName "$DisplayName"
 
@@ -686,7 +701,7 @@ function SearchRegistryKeysByRegex {
 
                     if ($ValueNameRegex) {  
                         if ($Key.GetValueNames() -match $ValueNameRegex) {  
-                            Write-Verbose ("{0}: has value names matched ValueNameRegex" -f $Key)  
+                            Write-Verbose ("{0}: has value name matched ValueNameRegex" -f $Key)  
                             $counter++
                             return [string] $Key
                         }  
@@ -727,6 +742,7 @@ function SearchRegistryValuesByRegex {
     begin { 
         Write-Host "SearchRegistryValuesByRegex=> Path[$Path]"
         Write-Verbose "SearchRegex=$SearchRegex"
+        $counter = 0
     } 
 
     process { 
@@ -742,13 +758,14 @@ function SearchRegistryValuesByRegex {
                 ForEach-Object {   
                     $item = $_ 
                     $ret = ($item.PSObject.Properties | Where-Object {
-                            $_.Name -match $SearchRegex -or $_.Value -match $SearchRegex }).Name
+                        $_.Name -match $SearchRegex -or $_.Value -match $SearchRegex }).Name
+                    $counter++
                     return $ret
                 } 
         }
     } 
     end{
-        Write-Host "Total matched values: $($ret.Count)"
+        Write-Host "Total matched values: $counter"
     }
 }
 
@@ -759,8 +776,8 @@ Export-ModuleMember -Variable *
 # SIG # Begin signature block
 # MIIwewYJKoZIhvcNAQcCoIIwbDCCMGgCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDeUFXPw2CJJqZW
-# dIVsQtBhXdFnA78+qTopcDHk0MX7lqCCDsswggboMIIE0KADAgECAhB3vQ4Ft1kL
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCdsqUPzSyYSmGi
+# jhXsvAzc4EmSGnAIkpIKhW0F5bVJJ6CCDsswggboMIIE0KADAgECAhB3vQ4Ft1kL
 # th1HYVMeP3XtMA0GCSqGSIb3DQEBCwUAMFMxCzAJBgNVBAYTAkJFMRkwFwYDVQQK
 # ExBHbG9iYWxTaWduIG52LXNhMSkwJwYDVQQDEyBHbG9iYWxTaWduIENvZGUgU2ln
 # bmluZyBSb290IFI0NTAeFw0yMDA3MjgwMDAwMDBaFw0zMDA3MjgwMDAwMDBaMFwx
@@ -844,23 +861,23 @@ Export-ModuleMember -Variable *
 # biBHQ0MgUjQ1IEVWIENvZGVTaWduaW5nIENBIDIwMjACDAfAcTao81JOF/v0qzAN
 # BglghkgBZQMEAgEFAKB8MBAGCisGAQQBgjcCAQwxAjAAMBkGCSqGSIb3DQEJAzEM
 # BgorBgEEAYI3AgEEMBwGCisGAQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqG
-# SIb3DQEJBDEiBCBNNJjNJ2nGk06mQv35rSEX6z4U2XwzLtejkCBVEX7qrDANBgkq
-# hkiG9w0BAQEFAASCAgACoHLvhybjDT7JwD3sjFVZaAk5gz0Vh/9GHnSeo4k6Hu30
-# ipY6R4paEjrlzbGbqc6hogqXJR2f5zFFTs7IgwlBcFY45FgqzPZxpwEWow1Dg2sW
-# f1/EVBONK2uneWz/DGX/36LRDbv0ZjRjowdOBbHIjVfh2YdEiVfx8f5bGevMdy7i
-# rx0QyZpy4LGn7WhWicQWjIgeGrDD1EhUEjxZMaXrfy4PH15qH1p6J9dWq8UuRYwq
-# 1PtXiz7jgJ2GqcTmLHLa9raqSbrNuwiF2Bfr65IZXMTX6BPjULicBBRVi8vPtF+Y
-# RxXhWEVWmLBF7YEe4+XcPj7fNMMS2vyG/syR2MlZr//WX+uLAyiPkQiMLYfn+4++
-# eS/W6m/pYDRNlgYV18ILFmzZSGo+O1lzJ1De+BYLplKqq2VbZGvKp8mi//ECK58E
-# EwkdAWVdAHtMSpJ3/EhueVH+7EVNoxWaj3QVWW5LpH1Y6PtO+qtvS5xUK7m9ilPD
-# GLrDiPLasoRgUPzmpxasdgM1OBd0lBXC2SHfnoHKvUrplLL/gpevkX6WJ1eeKNwf
-# Lv7cnpi3e0Yrl2ZSO/+zA5xEEadQyrisp8scYixTW10j/L3qApk3W7QSm7YCfgKH
-# fOJjWaxn7TE4Q+/ZbH43jfO7dxuTPLxKfrQKLUid5oJIC1tUrLMSI1HBOCl9KaGC
+# SIb3DQEJBDEiBCBPBmVFuwVZwkTiRqqCiqm6P9jNBQWN02aunrB98StXhDANBgkq
+# hkiG9w0BAQEFAASCAgBRmb06dB1BsWyYSF5u5b0XkoJ1W5RXTR56Sjz6NAe1fuex
+# blbsWK2xRewf87hm41WSbwx5eveUm88D+mQSmnLl7QdHsJcef8nnWL4jfpLhgDYq
+# 26xp0k/pwG5RsYPML9kaEz6tnvg9pQ7ej4+jIZpeC8IEaIFS3HFebS9HWNPN/Rgx
+# z13EHkGogXKEvaPxfl9aqr8P9ebv/QBT4QECrjc9LbSf+nkdIOk96PADyr7YYQTS
+# XQrQLuNuaEGzXuEMvIBIWXefGs7BSlRUREqOoP9yz0kpwljoCMiMAZhFjKDpxaYH
+# 1UjPIlnOMne7qULy3FoVksY2eMfneTdkQNclEOyX+EyRVq4Ki9wnXBJ2BMZEbA9Q
+# npmgU8hzRWVXJ2qDj+xpHWLXtlFB6quj9geDjASRzA0EKN/vwZnl5Cqaserh3Jfc
+# nljUwDjVJEzZOuDyMlRtNp/KjKsKFdl+GvCxzZSZHmxFVWILkfke0n9/+VbGRw9J
+# Pj0c81R3Kknpn80UoRqzwqQOGo6rs2kZi+lZ4UMaT22BInNaWZZ4fYv9HqYXbR7H
+# ztdcyPM1oOoD34wfETlspHAtGxt1JUncR6kCL+5oin0ZEubwYlR/oud9Riw4Hxlp
+# tUB+O3110KCuZzTjp8lJ2tN+0UTY0g69WwD4+jmI69bavMixNqkuVylgC5q8SaGC
 # He0wgh3pBgorBgEEAYI3AwMBMYId2TCCHdUGCSqGSIb3DQEHAqCCHcYwgh3CAgED
 # MQ0wCwYJYIZIAWUDBAICMIHkBgsqhkiG9w0BCRABBKCB1ASB0TCBzgIBAQYLKwYB
-# BAGgMgIDAgIwMTANBglghkgBZQMEAgEFAAQgn5ZDVOVRIRzKbjhKX66A+LblpFF9
-# Zvh0Pmiz0RXKmXsCFEOmjQjDLB3LdFjymHauzmSPRPTQGA8yMDI2MDYzMDIxNDYw
-# OVowAwIBAaBdpFswWTELMAkGA1UEBhMCQkUxGTAXBgNVBAoTEEdsb2JhbFNpZ24g
+# BAGgMgIDAgIwMTANBglghkgBZQMEAgEFAAQgp+VC5KVhJiPvd+GJJETqXYKQoadm
+# IMK6o4f0mZZv1bUCFDFTVh7nD02Mg9rUnp/eIxpZ3rnqGA8yMDI2MDcwODEzMjMz
+# MFowAwIBAaBdpFswWTELMAkGA1UEBhMCQkUxGTAXBgNVBAoTEEdsb2JhbFNpZ24g
 # bnYtc2ExLzAtBgNVBAMTJkdsb2JhbHNpZ24gUjQ1IFRTQSBmb3IgQ29kZVNpZ24g
 # MjAyNTEwoIIZYDCCBoowggRyoAMCAQICEQCEcj/BlcwW8dsrovZg3yvkMA0GCSqG
 # SIb3DQEBDAUAMF4xCzAJBgNVBAYTAkJFMRkwFwYDVQQKExBHbG9iYWxTaWduIG52
@@ -1002,18 +1019,18 @@ Export-ModuleMember -Variable *
 # YWxTaWduIE9mZmxpbmUgUjQ1IFRpbWVzdGFtcGluZyBDQSAyMDI1AhEAhHI/wZXM
 # FvHbK6L2YN8r5DALBglghkgBZQMEAgKgggFBMBoGCSqGSIb3DQEJAzENBgsqhkiG
 # 9w0BCRABBDArBgkqhkiG9w0BCTQxHjAcMAsGCWCGSAFlAwQCAqENBgkqhkiG9w0B
-# AQwFADA/BgkqhkiG9w0BCQQxMgQw4tYV5Vb0s1HuCM3Wkc6m2b0d+MkIWLIdrWi4
-# zwxbmjpdSjAOxRlxqwOgrh2rnPAmMIG0BgsqhkiG9w0BCRACLzGBpDCBoTCBnjCB
+# AQwFADA/BgkqhkiG9w0BCQQxMgQwhkWLS4IqcygCPfd6vDumEEHB+9a+wZ6UtqAt
+# mKaHgZPy9yFFhIC7b+i8wdLnJADCMIG0BgsqhkiG9w0BCRACLzGBpDCBoTCBnjCB
 # mwQggyrXLlI/3qyD+kaUvOfGzCYXZIgoZlZliMityjqDhVEwdzBipGAwXjELMAkG
 # A1UEBhMCQkUxGTAXBgNVBAoTEEdsb2JhbFNpZ24gbnYtc2ExNDAyBgNVBAMTK0ds
 # b2JhbFNpZ24gT2ZmbGluZSBSNDUgVGltZXN0YW1waW5nIENBIDIwMjUCEQCEcj/B
-# lcwW8dsrovZg3yvkMA0GCSqGSIb3DQEBDAUABIIBgFP2Qwr7DLvEZ7KUwb14bt7K
-# 2FAjm9ilm0X0Zu7YKu+awQb1ny3sWZlpI1go/v/zToFVwECAGrQybUSW7T/TeF7G
-# JDC+xs+AtGt6BkadUXWs5bVnnJPMfdf2SnQ8r9+jeGI0+nbDcceD0j7Fec2MnWpQ
-# 8qvY954j4lW34oP6K2a2vBhi8jTJRe0EbD7BMO7GCz2+z17HO8sNy368sU8oHZUD
-# ls2eEQR7tAbnUI3MNJ29nDWvgfAOMXDOVI6Pw+yQP87Ty3dRH0WQ3siKwRMUgSVW
-# ple+ua11zXk9hZel9GGjrh/PQlHk2CTHKABjVjpGFV5ChsUPPjr21w7Z7YaUPEID
-# SHGkuu/BU9Q4YVx+Z83ThmfEZ09V6pOsEzhD2HeP6qBJmJvb1W0QuZ9GaW4Y512l
-# XWbFuH4JantPszXw5cGPZ6FPaQTpuob+5ZR/vILFcA4KsMKcbampeDMl8Ku7B2dj
-# aKy5Sh9ZIV9ZYxSb5/j/gO5V2Tt3O687Y/E3Xd652Q==
+# lcwW8dsrovZg3yvkMA0GCSqGSIb3DQEBDAUABIIBgETHmfSnKj+PboA3cOKuoRSq
+# jb6RSLAtcGFjtN1/FHe/7uTWum0+GvfqIccJ/C+z3TYIEVMoNB7dmguStcuSq88W
+# 4d7bZ7tSuq8nt35zefI/KWhYQI+QoGeC5rPtJSPpgAFnf9A+7LgZyKcH8KgeHkrR
+# lzFHcJlbjil9jUcZbAy2EqZN2uSCrXSs9Ax90L+kUfJPyqlPHNnl0yat8aN9UcxN
+# K2D35E3fpPIA7R39EUWT1f5JAxaZnEs/4/PXfVT+YALp3ZAOZPUyFsNvXc8vrlTA
+# 7bKvHR/Q8xLcnxO7psK96LfrSZfocx7+VUxuQ0P8pULfmGrMIiQeZpi2vs0ZfeIo
+# Mo2C+kr33Tfo6l3/BKZQ2QVwT6vaH/53PCC7BOaeRbO0Pr5ghMRwcvl4+x3mjLBb
+# XfsNuJE6mS9iZnw4SzEL0JANwmeXGzMQKQzBOTmxNlfudcUAZLBVK2gegh5Dg9N1
+# 6FupX0mo1+foKIG72y+LS7aWZMrml7mjjrkFFdcZ6g==
 # SIG # End signature block
