@@ -127,10 +127,17 @@ function Grant-FolderFullControl() {
     )
 
     $currentUser = "$env:USERDOMAIN\$env:USERNAME"
-    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $dir_rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
         $currentUser,
         "FullControl",
         "ContainerInherit,ObjectInherit",
+        "None",
+        "Allow"
+    )
+    $file_rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $currentUser,
+        "FullControl",
+        "None",
         "None",
         "Allow"
     )
@@ -148,14 +155,14 @@ function Grant-FolderFullControl() {
             }
 			$acl = Get-Acl $FolderPath
 			$acl.SetAccessRuleProtection($false, $false)  # disable inherited ACL protection if needed
-			$acl.AddAccessRule($rule)
+			$acl.AddAccessRule($dir_rule)
 			Set-Acl -Path $FolderPath -AclObject $acl
 			Write-Host "Applied FullControl to $FolderPath folder." -ForegroundColor Green
 
 			Get-ChildItem -LiteralPath $FolderPath -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
 				try {
 					$acl = Get-Acl $_.FullName
-					$acl.AddAccessRule($rule)
+					$acl.AddAccessRule($file_rule)
 					Set-Acl -Path $_.FullName -AclObject $acl
 				}
 				catch {
