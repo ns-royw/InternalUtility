@@ -144,42 +144,49 @@ function Grant-FolderFullControl() {
 
     Write-Host "`n=== Processing: $FolderPath ===" -ForegroundColor Magenta
 
-	if(Test-Path $FolderPath)
-	{
-		try {
-			$got_owner = Get-FolderOwnership $FolderPath
+    if(Test-Path $FolderPath)
+    {
+        try {
+            $got_owner = Get-FolderOwnership $FolderPath
 
             if(!$got_owner) {
                 Write-Error "Failed to take ownership of $FolderPath. Cannot apply FullControl."
                 return $false
             }
-			$acl = Get-Acl $FolderPath
-			$acl.SetAccessRuleProtection($false, $false)  # disable inherited ACL protection if needed
-			$acl.AddAccessRule($dir_rule)
-			Set-Acl -Path $FolderPath -AclObject $acl
-			Write-Host "Applied FullControl to $FolderPath folder." -ForegroundColor Green
+            $acl = Get-Acl $FolderPath
+            $acl.SetAccessRuleProtection($false, $false)  # disable inherited ACL protection if needed
+            $acl.AddAccessRule($dir_rule)
+            Set-Acl -Path $FolderPath -AclObject $acl
+            Write-Host "Applied FullControl to $FolderPath folder." -ForegroundColor Green
 
-			Get-ChildItem -LiteralPath $FolderPath -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-				try {
-					$acl = Get-Acl $_.FullName
-					$acl.AddAccessRule($file_rule)
-					Set-Acl -Path $_.FullName -AclObject $acl
-				}
-				catch {
-                    Write-Host "$($_.FullName): Failed to apply FullControl. Error: $($_.Exception.Message)" -ForegroundColor Red
+            Get-ChildItem -LiteralPath $FolderPath -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                try {
+                    $current = $_.FullName
+                    $acl = Get-Acl $_.FullName
+                    if ($_.PSIsContainer) {
+                        $acl.AddAccessRule($dir_rule)
+                    }
+                    else {
+                        $acl.AddAccessRule($file_rule)
+                    }
+                    Set-Acl -Path $_.FullName -AclObject $acl
+                }
+                catch {
+                    Write-Host "$current => Failed to apply FullControl. Error: $($_.Exception.Message)" -ForegroundColor Red
                 }
 			}
             return $true
-		}
-		catch {
-			Write-Error "Error applying ACLs to: $FolderPath"
-			Write-Error $_.Exception.Message
-		}
-	}
-	else{
-		Write-Host "$FolderPath Doesn't exist"
-	}
-  return $false
+        }
+        catch {
+            Write-Error "Error applying ACLs to: $FolderPath"
+            Write-Error $_.Exception.Message
+        }
+    }
+    else{
+        Write-Host "$FolderPath Doesn't exist"
+    }
+    
+    return $false
 }
 function EnableProcessTokenPrivilege {
     [CmdletBinding()]
