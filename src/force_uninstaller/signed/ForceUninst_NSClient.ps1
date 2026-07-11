@@ -1,5 +1,5 @@
 #Force Remove NSClient utility
-#Author: Roy Wang , 2025/Oct Netskope Inc.
+#Author: Roy Wang , 2025 Netskope Inc.
 #
 #This script came from ENG-735239. Customer can't uninstall NSClient, used 3rd Party Tool to remove it.
 #Support need a power shell script to resolve similar issue.
@@ -9,9 +9,8 @@
 #   note: also put ForceUninst_Lib.psm1 module file in the same folder.
 #2. Open PowerShell as Administrator!
 #3. Run the script:
-#   Set-ExecutionPolicy Bypass -Scope Process -Force; .\ForceUninst_NSClient.ps1
-#   or you can open a command prompt as admin, and run:
 #   powershell -ExecutionPolicy Bypass -File C:\Temp\ForceUninst_NSClient.ps1
+#
 #[What this script will do]
 #1. Kill NSClient processes: stAgentSvc.exe, stAgentUI.exe
 #2. Stop and delete NSClient services: stAgentSvc, stadrv
@@ -23,11 +22,12 @@
 #[Limitation]
 #1. If SelfProtection is enabled, this script may not work. User have to disable SelfProtection first.
 #2. This script only support Windows PowerShell 5.0 and above. (Win10 has built-in PS v5.1)
+#3. When SelfProtection is enabled, executing this script twice would delete service/driver entry but files left.
 
-#handle "-Verbose" parameter of script execution.
-#[NOTE]this switch should be first line of this script file.
 param(
-    [switch] $Verbose
+    [switch] $Verbose,
+    [switch] $DryRun,       #only display target registry keys, values, folders, services, drivers, processes to be removed. Do not actually remove them.
+    [switch] $BruteForce    #perform brute-force cleanup of abandoned MSI components registry keys. This may cause some errors if the components are still in use. Use this switch with caution.
 )
 if ($Verbose) { 
     $Global:VerbosePreference = 'Continue'
@@ -41,16 +41,16 @@ else {
 #Requires -RunAsAdministrator
 Import-Module $PSScriptRoot\ForceUninst_Lib.psm1 -Force     #psm1 module file should be in the same folder as this script
 
-[string] $NETSCKOPE_DISPLAY_NAME = "Netskope Client"  #APP NAME you saw on Add/Remove Programs
+[string] $NETSCKOPE_DISPLAY_NAME = "Netskope Client"        #APP NAME you saw on Add/Remove Programs
 [string] $NETSCKOPE_PRODUCT_NAME = $NETSCKOPE_DISPLAY_NAME
 [string[]] $REG_NSCLIENT_INSTALL = @("HKEY_LOCAL_MACHINE\SOFTWARE\Netskope\Provisioning", 
                                     "HKEY_LOCAL_MACHINE\SOFTWARE\NetskopeProductVersions", 
                                     "HKEY_LOCAL_MACHINE\SOFTWARE\NetSkope", 
                                     "HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\NetSkope", 
                                     "HKEY_CURRENT_USER\SOFTWARE\NetSkope")
-[string[]] $NSCLIENT_INSTDIR_KEYWORDS = @("\\Netskope") #@("\\Netskope\\STAgent\\", "\\Netskope\\EPDLP", "\\Netskope")
-[string[]] $NSCLIENT_COMPONENT_PATH_KEYWORDS = $NSCLIENT_INSTDIR_KEYWORDS
-[STRING[]] $INSTALL_FOLDERS = @("$env:ProgramFiles\Netskope", 
+[string[]] $NS_INSTDIR_KEYWORDS = @("\\Netskope") #@("\\Netskope\\STAgent\\", "\\Netskope\\EPDLP", "\\Netskope")
+[string[]] $NS_COMPONENT_PATH_KEYWORDS = $NS_INSTDIR_KEYWORDS
+[string[]] $INSTALL_FOLDERS = @("$env:ProgramFiles\Netskope", 
                                 "${env:ProgramFiles(x86)}\Netskope", 
                                 "$env:ProgramData\Netskope")
 [string] $NS_PROCESS_SVC = "stAgentSvc"
@@ -60,44 +60,36 @@ Import-Module $PSScriptRoot\ForceUninst_Lib.psm1 -Force     #psm1 module file sh
 [string] $NS_SVC_STADRV = "stadrv"
 [string] $NS_SVC_EPDLPSVC = "epdlp"
 [string] $NS_SVC_EPDLPDRV = "epdlpdrv"
-[string] $NS_INSTDIR_KEYWORD = "Netskope"
-
-#Kill StagentSvc and StagntUI processes before stop stadrv driver service
-KillProcesses -ProcessNames @($NS_PROCESS_SVC, $NS_PROCESS_UI, $NS_SVC_EPDLPSVC)
-
-DeleteService -ServiceName $NS_SVC_STAGENTSVC -Force
-DeleteService -ServiceName $NS_SVC_EPDLPSVC -Force
-
-StopDriver -DriverSvcName $NS_SVC_STADRV 
-DeleteDriver -ServiceName $NS_SVC_STADRV 
-
-StopDriver -DriverSvcName $NS_SVC_EPDLPDRV 
-DeleteDriver -ServiceName $NS_SVC_EPDLPDRV 
-
-EnableProcessTokenPrivilege
-
-# #cleanup registry, install folders, startup run
-RemoveFolders -PathList $INSTALL_FOLDERS -TakeOwner
-RemoveRegistryKeys -PathList $REG_NSCLIENT_INSTALL 
-RemoveAppStartupRun -Name $NS_STARTUP_RUN_NAME 
 
 $RegKeysToRemove = @()
 $RegValuesToRemove = @()
+$ProductReg = ""
+$ProductCode = ""
+
+Write-Host "Starting Force Uninstallation for '$NETSCKOPE_DISPLAY_NAME'..."
+Write-Host "Collecting information from registry and system..."
 
 #brute force cleanup MSI registry entries
 $ProductReg = SearchMsiProductReg -DisplayName $NETSCKOPE_DISPLAY_NAME
 if([string]::IsNullOrEmpty($ProductReg)){
-    $ProductReg = "empty..."
+    Write-Host "Product Registry Key not found! Please use -BruteForce switch to remove abandoned MSI components registry keys."
 }
-$ProductCode = $($ProductReg | Select-String -Pattern "$REGEX_PRODUCT_KEY" | %{$_.Matches.Groups[1].value})
+else {
+    Write-Host "Product Registry Key=$ProductReg"
+    $ProductCode = $($ProductReg | Select-String -Pattern "$REGEX_PRODUCT_KEY" | %{$_.Matches.Groups[1].value})
+}
+
 if([string]::IsNullOrEmpty($ProductCode)){
-    $ProductCode = "empty..."
+    Write-Error "Product Code is empty! Please use -BruteForce switch to remove abandoned MSI components registry keys."
 }
-Write-Host "Product Registry Key=$ProductReg, Product Code=$ProductCode"
-$RegKeysToRemove += $ProductReg
+else {
+    Write-Host "Product Code=$ProductCode"
+    $RegKeysToRemove += $ProductReg
+}
 
 Write-Host "Scanning MSI Install Folders Registry Values"
-SearchRegistryValuesByRegex -Path $REG_MSI_INSTALL_FOLDERS_KEY -SearchRegex $NS_INSTDIR_KEYWORD | 
+foreach ($keyword in $NS_INSTDIR_KEYWORDS) {
+    SearchRegistryValuesByRegex -Path $REG_MSI_INSTALL_FOLDERS_KEY -SearchRegex $keyword | 
     ForEach-Object {
         $item = $_
         if([string]::IsNullOrEmpty($item)){
@@ -105,7 +97,8 @@ SearchRegistryValuesByRegex -Path $REG_MSI_INSTALL_FOLDERS_KEY -SearchRegex $NS_
         }
         $RegValuesToRemove += $item
     }
-
+}
+    
 Write-Host "Scanning MSI Class Installer Product Registry Keys"
 SearchRegistryKeysByRegex -Path $REG_MSI_INSTCLASS_PRODUCT_KEY -SearchRegex $NETSCKOPE_PRODUCT_NAME | 
     ForEach-Object {
@@ -117,8 +110,12 @@ SearchRegistryKeysByRegex -Path $REG_MSI_INSTCLASS_PRODUCT_KEY -SearchRegex $NET
         $RegKeysToRemove += $item
     }
 
-Write-Host "Scanning MSI Class Installer Feature Registry Keys"
-SearchRegistryKeysByRegex -Path $REG_MSI_INSTCLASS_FEATURE_KEY -SearchRegex $ProductCode | 
+if([string]::IsNullOrEmpty($ProductCode)){
+    Write-Host "Product Code is empty, skipping scanning MSI Class Installer Feature Registry Keys"
+}
+else{
+    Write-Host "Scanning MSI Class Installer Feature Registry Keys"
+    SearchRegistryKeysByRegex -Path $REG_MSI_INSTCLASS_FEATURE_KEY -SearchRegex $ProductCode | 
     ForEach-Object {
         $item = $_
         if([string]::IsNullOrEmpty($item)){
@@ -126,17 +123,23 @@ SearchRegistryKeysByRegex -Path $REG_MSI_INSTCLASS_FEATURE_KEY -SearchRegex $Pro
         }
         $RegKeysToRemove += $item
     }
+}
 
-Write-Host "Scanning MSI Class Installer UpgradeCodes Registry Keys"
-SearchRegistryKeysByRegex -Path $REG_MSI_INSTCLASS_UPGRADE_KEY -SearchRegex $ProductCode | 
-    ForEach-Object {
-        $item = $_
-        if([string]::IsNullOrEmpty($item)){
-            return
+if([string]::IsNullOrEmpty($ProductCode)){
+    Write-Host "Product Code is empty, skipping scanning MSI Class Installer UpgradeCode Registry Keys"
+}
+else{
+    Write-Host "Scanning MSI Class Installer UpgradeCodes Registry Keys"
+    SearchRegistryKeysByRegex -Path $REG_MSI_INSTCLASS_UPGRADE_KEY -SearchRegex $ProductCode | 
+        ForEach-Object {
+            $item = $_
+            if([string]::IsNullOrEmpty($item)){
+                return
+            }
+            Write-Host "UpgradeCodes Key=>$item"
+            $RegKeysToRemove += $item
         }
-        Write-Host "UpgradeCodes Key=>$item"
-        $RegKeysToRemove += $item
-    }
+}
 
 Write-Host "Scanning MSI Uninstall Registry Keys"
 SearchRegistryKeysByRegex -Path $REG_MSI_UNINST_KEY -SearchRegex $NETSCKOPE_PRODUCT_NAME | 
@@ -148,42 +151,110 @@ SearchRegistryKeysByRegex -Path $REG_MSI_UNINST_KEY -SearchRegex $NETSCKOPE_PROD
         $RegKeysToRemove += $item
     }
 
-Write-Host "Scanning MSI Components Registry Keys"
-SearchRegistryKeysByRegex -Path $REG_MSI_COMPONENTS_KEY -SearchRegex $ProductCode | 
-    ForEach-Object {
-        $item = $_
-        if([string]::IsNullOrEmpty($item)){
-            return
+if([string]::IsNullOrEmpty($ProductCode)){
+    Write-Host "Product Code is empty, skipping scanning MSI Components Registry Keys"
+}
+else{
+    Write-Host "Scanning MSI Components Registry Keys"
+    SearchRegistryKeysByRegex -Path $REG_MSI_COMPONENTS_KEY -SearchRegex $ProductCode | 
+        ForEach-Object {
+            $item = $_
+            if([string]::IsNullOrEmpty($item)){
+                return
+            }
+            $RegKeysToRemove += $item
         }
-        $RegKeysToRemove += $item
-    }
+}
 
-if(!$Debugging)
-{
-    Write-Host "Removing Collected Registry Keys and Values..."
+Write-Host "`n`n====================================`n"
+#Kill StagentSvc and StagntUI processes before stop stadrv driver service
+if(-not $DryRun) {
+    #stop service then kill service processes again. It is make sure the service is stopped before deleting the service and driver.
+    Write-Host "Stopping NSClient services..."
+    Stop-Service -Name $NS_SVC_STAGENTSVC -Force -ErrorAction SilentlyContinue
+    Stop-Service -Name $NS_SVC_EPDLPSVC -Force -ErrorAction SilentlyContinue
+    
+    Write-Host "Killing NSClient processes..."
+    KillProcesses -ProcessNames @($NS_PROCESS_SVC, $NS_PROCESS_UI, $NS_SVC_EPDLPSVC)
+    
+    Write-Host "Deleting NSClient services..."
+    DeleteService -ServiceName $NS_SVC_STAGENTSVC -Force
+    DeleteService -ServiceName $NS_SVC_EPDLPSVC -Force
+
+    Write-Host "Deleting NSClient drivers..."
+    StopDriver -DriverSvcName $NS_SVC_STADRV 
+    DeleteDriver -ServiceName $NS_SVC_STADRV 
+    StopDriver -DriverSvcName $NS_SVC_EPDLPDRV 
+    DeleteDriver -ServiceName $NS_SVC_EPDLPDRV 
+
+    EnableProcessTokenPrivilege
+
+    # #cleanup registry, install folders, startup run
+    RemoveFolders -PathList $INSTALL_FOLDERS -TakeOwner
+    RemoveRegistryKeys -PathList $REG_NSCLIENT_INSTALL 
+    RemoveAppStartupRun -Name $NS_STARTUP_RUN_NAME 
+}
+else{
+    Write-Host "[DryRun]Killing NSClient processes: $NS_PROCESS_SVC, $NS_PROCESS_UI, $NS_SVC_EPDLPSVC"
+    Write-Host "[DryRun]Deleting NSClient services: $NS_SVC_STAGENTSVC, $NS_SVC_EPDLPSVC"
+    Write-Host "[DryRun]Deleting NSClient drivers: $NS_SVC_STADRV, $NS_SVC_EPDLPDRV"
+
+    Write-Host "[DryRun]Removing Install Folders: `n$($INSTALL_FOLDERS -join "  `n")"
+    Write-Host "[DryRun]Removing Registry Keys: `n$($REG_NSCLIENT_INSTALL -join "  `n")"
+    Write-Host "[DryRun]Removing Startup Run Entry: $NS_STARTUP_RUN_NAME"
+}
+
+if(-not $DryRun) {
+    Write-Host "Removing Collected Registry Keys"
     foreach ($regKey in $RegKeysToRemove) {
         RemoveRegistryKey -Path $regKey
     }
+
+    Write-Host "Removing Collected Registry Values from $REG_MSI_INSTALL_FOLDERS_KEY"
     foreach ($regValue in $RegValuesToRemove) {
         RemoveRegistryValue -Path "$REG_MSI_INSTALL_FOLDERS_KEY" -ValueName "$regValue"
     }
-}
 
-if(!$Debugging)
-{
 #brute-force cleanup abandoned components
-    Write-Host "Brute-Force Removing Abandoned MSI Components Registry Keys"
-    foreach ($keyword in $NSCLIENT_COMPONENT_PATH_KEYWORDS) {
-        SearchRegistryKeysByRegex -Path $REG_MSI_COMPONENTS_KEY -SearchRegex $keyword | 
-            ForEach-Object {
-                $item = $_
-                if([string]::IsNullOrEmpty($item)){
-                    return
+    if ($BruteForce) {
+        Write-Host "Brute-Force Removing Abandoned MSI Components Registry Keys"
+        foreach ($keyword in $NS_COMPONENT_PATH_KEYWORDS) {
+            SearchRegistryKeysByRegex -Path $REG_MSI_COMPONENTS_KEY -SearchRegex $keyword | 
+                ForEach-Object {
+                    $item = $_
+                    if([string]::IsNullOrEmpty($item)){
+                        return
+                    }
+                    Write-Host "Abandoned Components Key=>$item"
+                    RemoveRegistryKey -Path $item
                 }
-                Write-Host "Abandoned Components Key=>$item"
-                RemoveRegistryKey -Path $item
-            }
         }
+    }
+}
+else {
+    Write-Host "[DryRun] Collected Registry Keys to be remove:"
+    foreach ($regKey in $RegKeysToRemove) {
+        Write-Host "  => $regKey"
+    }
+    
+    Write-Host "[DryRun] Collected Registry Values from $REG_MSI_INSTALL_FOLDERS_KEY to be removed"
+    foreach ($regValue in $RegValuesToRemove) {
+        Write-Host "  => $regValue from $REG_MSI_INSTALL_FOLDERS_KEY"
+    }
+
+    if ($BruteForce) {
+        Write-Host "[DryRun]Brute-Force Removing Abandoned MSI Components Registry Keys"
+        foreach ($keyword in $NS_COMPONENT_PATH_KEYWORDS) {
+            SearchRegistryKeysByRegex -Path $REG_MSI_COMPONENTS_KEY -SearchRegex $keyword | 
+                ForEach-Object {
+                    $item = $_
+                    if([string]::IsNullOrEmpty($item)){
+                        return
+                    }
+                    Write-Host "[DryRun]Abandoned Components Key=>$item"
+                }
+        }
+    }
 }
 
 Write-Host "NSClient Force Uninstallation Completed. Please reboot the system to take effect!!" -ForegroundColor Red -BackgroundColor Yellow
@@ -191,8 +262,8 @@ Write-Host "NSClient Force Uninstallation Completed. Please reboot the system to
 # SIG # Begin signature block
 # MIIwewYJKoZIhvcNAQcCoIIwbDCCMGgCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDnTMbwjV6D8FoY
-# +e9fpoGGGOZS6XThNwLthzeqttbXqKCCDsswggboMIIE0KADAgECAhB3vQ4Ft1kL
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAN3fbzyJg0zZkS
+# d8pf/xr5AsI0cGrWMsxCyhLUemHLFaCCDsswggboMIIE0KADAgECAhB3vQ4Ft1kL
 # th1HYVMeP3XtMA0GCSqGSIb3DQEBCwUAMFMxCzAJBgNVBAYTAkJFMRkwFwYDVQQK
 # ExBHbG9iYWxTaWduIG52LXNhMSkwJwYDVQQDEyBHbG9iYWxTaWduIENvZGUgU2ln
 # bmluZyBSb290IFI0NTAeFw0yMDA3MjgwMDAwMDBaFw0zMDA3MjgwMDAwMDBaMFwx
@@ -276,23 +347,23 @@ Write-Host "NSClient Force Uninstallation Completed. Please reboot the system to
 # biBHQ0MgUjQ1IEVWIENvZGVTaWduaW5nIENBIDIwMjACDAfAcTao81JOF/v0qzAN
 # BglghkgBZQMEAgEFAKB8MBAGCisGAQQBgjcCAQwxAjAAMBkGCSqGSIb3DQEJAzEM
 # BgorBgEEAYI3AgEEMBwGCisGAQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqG
-# SIb3DQEJBDEiBCBEyYsBoN0ysrj+CuIZx3Vpk1HDruRlb3/L3zTAfzSDGzANBgkq
-# hkiG9w0BAQEFAASCAgDV77T/6vZ6SufmXLxDqYoa53ki8QS9Dr3Hmkarv/H0Qv3z
-# LAFMxwlxFy8m9dXTop3mp1DNvrjB4a8j/dXBqZlo0OyAe7T5LVofuRZlWetB5ENB
-# TnEKg1NW/aSW6l3+3kZbjxLog2NYNaAfQxfh2Tvw/xNraoYZK3cucQGSoaF3C/+X
-# DjgvTu+61Xszue3qpWYTMMZdBCjloymbXLBhz/Nz8BCbqGoLoTyMwVkV2nNH3ZiR
-# JRuwX5kAubPWVtziUt2qfZ2lMd55ztYIqCtiqhEUjXk0Ne/cwPzADGqnOjKTtVyj
-# du0teRovutsfx3A3VnopOFbauYhtNRDwzV4Mx+h3QAE6WSqTBOqAShLxoj6AhxPE
-# csSPovgB7+NAvkZgkfyeJ4NRFu4Ogf0RLVG6VQzh0HV2ROXN+jMMUiPJtNf/DMSq
-# SA/WyCD1lIeXa0xaZw30X5wkO4mr8c4+tib1Hsz29Ycsd2Q9pk/p8rWUBUgziZId
-# 4jFlCOd1jN6mVdH8MTRp8NBKLXgVif0PQHKpovXwHEAbbrJWKV9ZW0/5tMl6TbYg
-# fcTS0WB7LFlI6x3XPwp6Jz55hxDyYs70y/6Y1QP0mHGS/tCb/AcrJYkUW+387hQQ
-# Wyo/4prmfJJqN4uuIPrnZ1LERw7OB02WSskEKDmRK3Hx02eVUKXzVMorfZ/J8aGC
+# SIb3DQEJBDEiBCCxCg2xC8Wuyp5IFnrri+NQJ3nA53k6YC9yEBhwwqMRLjANBgkq
+# hkiG9w0BAQEFAASCAgCXIkAHVDLkOVG+C4lQPEl9w/s/99drWatC0sWXcc5jjZEw
+# kSHW6YOw8h394xMB/cFgCVr/asnHW+P9O9U6ZKSxvCUEhFi/mxIWgOzzMfyJ4m+D
+# rvoWC6esCOxQU9qW4N/vATGoRcdJo9KGgz9UZ5/ViKnSZTLv+A10+DrBwJWb1w3a
+# 8X3hMzgxbU9aEQsiyR7au9EfOHQHYAz7nRWCYeMdnZ/d8FzeUylMLrX9+W0xYg+e
+# TsnaE8b9LVXRsROd1h7TsMUw+NeilJs8e4VLlsOe7QMvpXVttihU30EHVysUBgea
+# iB/ntRr6DnmDOaLccaGZSzfXa6dNjYdno108RAgW6hg3FyxEMF2sAguqOtUBAst4
+# jBLMGHG2fpFCgZdNn9ownliSvMJ/8HiMZs/pKyiv1WPfLC0I84b0facxD/aGQFyg
+# aEH7JTQw6lZ55JItUYXyTrtmiAlsKzyp9CVm7hqejjOd6zuUkdpbeSpR6Oh7r29z
+# ISZz86eo4R4IDyQ0O1hrKwF2j/0yTcmNMh01rze48J5kOgSa/g8RvN7x1bEcuxX+
+# uo/wFP2/V7FvF8/hLwkzPv9SFsK3xKmriGXUJtsmXgq6KSC3968MArb2M7WLtxzM
+# zA3ZJL9p4+UbUpbcVWqsf7TLxuXWMYldQsxDvgOFw6VjsQot0jV/caTY/o+hp6GC
 # He0wgh3pBgorBgEEAYI3AwMBMYId2TCCHdUGCSqGSIb3DQEHAqCCHcYwgh3CAgED
 # MQ0wCwYJYIZIAWUDBAICMIHkBgsqhkiG9w0BCRABBKCB1ASB0TCBzgIBAQYLKwYB
-# BAGgMgIDAgIwMTANBglghkgBZQMEAgEFAAQgsTW5uwXLgwo+DcXlGZwsI2lyFxP2
-# 0nXY/T02jXKwO/cCFBFK2pOwr6EBTB1woCEk/30krkHJGA8yMDI2MDYzMDIxNDYx
-# MlowAwIBAaBdpFswWTELMAkGA1UEBhMCQkUxGTAXBgNVBAoTEEdsb2JhbFNpZ24g
+# BAGgMgIDAgIwMTANBglghkgBZQMEAgEFAAQgDF5HIDyUjXX1q+ex1CjahNkzYVz9
+# i7BNPE/Jdyg/84MCFC8pcaMrYKDB/2B2E1kJLKftU/xWGA8yMDI2MDcwODEzMjMz
+# M1owAwIBAaBdpFswWTELMAkGA1UEBhMCQkUxGTAXBgNVBAoTEEdsb2JhbFNpZ24g
 # bnYtc2ExLzAtBgNVBAMTJkdsb2JhbHNpZ24gUjQ1IFRTQSBmb3IgQ29kZVNpZ24g
 # MjAyNTEwoIIZYDCCBoowggRyoAMCAQICEQCEcj/BlcwW8dsrovZg3yvkMA0GCSqG
 # SIb3DQEBDAUAMF4xCzAJBgNVBAYTAkJFMRkwFwYDVQQKExBHbG9iYWxTaWduIG52
@@ -434,18 +505,18 @@ Write-Host "NSClient Force Uninstallation Completed. Please reboot the system to
 # YWxTaWduIE9mZmxpbmUgUjQ1IFRpbWVzdGFtcGluZyBDQSAyMDI1AhEAhHI/wZXM
 # FvHbK6L2YN8r5DALBglghkgBZQMEAgKgggFBMBoGCSqGSIb3DQEJAzENBgsqhkiG
 # 9w0BCRABBDArBgkqhkiG9w0BCTQxHjAcMAsGCWCGSAFlAwQCAqENBgkqhkiG9w0B
-# AQwFADA/BgkqhkiG9w0BCQQxMgQw2PxEhb/27WllkyyY/UC9TOwxFrvWnr2j1+JR
-# dlnaIzFTjl/2m6HO+Y/l/6mRsWmJMIG0BgsqhkiG9w0BCRACLzGBpDCBoTCBnjCB
+# AQwFADA/BgkqhkiG9w0BCQQxMgQwfct7VWh/EimMUtQRe7+3WI7UBNbH4TXNmnuw
+# nTfYNtJFwm5FVx6fMXMFJG4TPhZ0MIG0BgsqhkiG9w0BCRACLzGBpDCBoTCBnjCB
 # mwQggyrXLlI/3qyD+kaUvOfGzCYXZIgoZlZliMityjqDhVEwdzBipGAwXjELMAkG
 # A1UEBhMCQkUxGTAXBgNVBAoTEEdsb2JhbFNpZ24gbnYtc2ExNDAyBgNVBAMTK0ds
 # b2JhbFNpZ24gT2ZmbGluZSBSNDUgVGltZXN0YW1waW5nIENBIDIwMjUCEQCEcj/B
-# lcwW8dsrovZg3yvkMA0GCSqGSIb3DQEBDAUABIIBgLfImILSMiBCudKbf2c3T+a2
-# 2ZxEf+j+sAjWM/uM+ixOx9DX41nE1jm5d+hA5YxHb+LAG9WrPhA03NUYFng/9GsK
-# ex3bVmgwbV6I5W8KBKRJDqbXe5QJklxqxHRR8XS2yfwcfGFiL0UvpbEGjdobxAWA
-# vp8YGIwjoWLh3qzqGPOJL8IXmVfMHV9gg1dvzdDoV9ycQFZXzCaGh3bmrB32w17c
-# ll7hRVOOS1o+z/KrB5RWGdusCSiam09C053ULDPW6j9JlDOm8vQnCIgH3fitN+/u
-# CIBVq90ZeYktyjR64x7pCIcbEl/0nDebdl6QURhTD5shSMQu8bB2MG82CpuFt1u+
-# RJxWU3ySwpHMY+hG1xXu7OjcC2jPolruSqQeAbZmAc50nIE984gW/blwhEIMc7xk
-# LjNbDlQfLD8hJw+vmWHz6gXHCBAZRSE5SgdpgQ/GmrqXW5IWuDSfWpOHEcA1GZpX
-# 75bmTV9Q/YTXtrWj0ZnMKlnClDzeaacnl6Qz/LmXWg==
+# lcwW8dsrovZg3yvkMA0GCSqGSIb3DQEBDAUABIIBgEVIzgxNWSTyfRc8LZiz/ycr
+# OAqZvsyGPV+/+lviw07THeN+caq+TS57gTrp+RVGIuxXfh+Nlu/Xlx7aca0pXbfL
+# +Hpttm5OncO3gEuJlLVZ86v11FvlpScAWHS1RjncvrB5NWs8pDrIgmS5d8qEwX1/
+# JQ3Q5tWvMPtnoVhUCrY/rZHiCAUFeaYfopkEkAdtyE1Dsi+7N9vCMon2omrNSXr0
+# f8MQ0ZjN6+/qelgfaXbWyzP+vD1Wd4EiQk95aG3CLyunM49z4L8zz7A802cN83kL
+# ZwlgkGsAauxFUXCEISfB60bWjM5G34rvvZEHFI79onvEhKsrOsnMI5jmjM3InOEa
+# Dcvz5yC/ci5WSYVnD+C2Gmk5lR9OsdrrTUwVLmoN2VuAgGx/kG2B/6NAYWlZcPNH
+# rMyXg8povOolu6ixxOn8QgWusEb/VWByRZuQSVSXlEo+t49W8r9tmP3u2dAbJsFm
+# CHl2I33iWVl8QAdxu8n2wlb3JKImRbfWIDiOxJSQsQ==
 # SIG # End signature block
