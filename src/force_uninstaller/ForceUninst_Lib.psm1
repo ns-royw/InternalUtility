@@ -172,7 +172,7 @@ function Grant-FolderFullControl() {
 	else{
 		Write-Host "$FolderPath Doesn't exist"
 	}
-    return $false
+  return $false
 }
 function EnableProcessTokenPrivilege {
     [CmdletBinding()]
