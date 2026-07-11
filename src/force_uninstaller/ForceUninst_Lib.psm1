@@ -1,15 +1,5 @@
 #Requires -RunAsAdministrator
 
-#Release Notes
-# Author: Roy Wang , 2025/Oct Netskope Inc.
-# This script provides MSI-related registry handling and app uninstall functions. 
-# Its main purpose is to force-remove apps that have broken MSI information. 
-# Before using this script, you must check that it has a Netskope signature.
-#
-# Release History:
-# R0.7: 2025/Oct Roy Wang. first version
-# R0.8: 2026/Jul Roy Wang. bug fixing and refactoring
-
 #special notes:
 #"product key" is a special order of GUID reprentation used by MSI installer internally.
 #for example: 
@@ -18,7 +8,7 @@
 # Product key in registry => B7483AA3 285C FA84 EACC D2B9508D5754
 #
 
-[string] $REGEX_PRODUCT_KEY = "([0-9A-Fa-f]{32})"   #hex string, EXAMPLE: 7B7C5F31CED5DDDFD7E984F495D8F0BB
+[string] $REGEX_PRODUCT_KEY = "([0-9A-Fa-f]{32})"   #EXAMPLE: 7B7C5F31CED5DDDFD7E984F495D8F0BB
 [string] $REG_MSI_PRODUCT_KEY = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Products"
 [string] $REG_MSI_COMPONENTS_KEY = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UserData\S-1-5-18\Components"
 [string] $REG_MSI_UPGRADE_KEY = "HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Installer\UpgradeCodes"
@@ -93,13 +83,12 @@ function Get-FolderOwnership{
     )
     $currentUser = "$env:USERDOMAIN\$env:USERNAME"
     Write-Verbose "Taking ownership of: $Fullpath"
-
-    takeown /F "$Fullpath" /R /D Y | Out-Null
-    if ($LASTEXITCODE -eq 0) {
+    try {
+        takeown /F "$Fullpath" /R /D Y | Out-Null
         Write-Host "Ownership taken successfully via takeown.exe." -ForegroundColor Green
         return $true
     }
-    else {
+    catch {
         Write-Verbose "takeown.exe failed. Trying Set-Acl method..."
         try {
             $owner = New-Object System.Security.Principal.NTAccount($currentUser)
@@ -110,11 +99,10 @@ function Get-FolderOwnership{
             return $true
         }
         catch {
-            Write-Host "Failed to take ownership of $Fullpath" -ForegroundColor Red
+            Write-Host "Failed to take ownership of $Path" -ForegroundColor Red
             Write-Host $_.Exception.Message -ForegroundColor DarkRed
         }
     }
-
     return $false
 }
 function Grant-FolderFullControl() {
@@ -140,12 +128,8 @@ function Grant-FolderFullControl() {
 	if(Test-Path $FolderPath)
 	{
 		try {
-			$got_owner = Get-FolderOwnership $FolderPath
+			Get-FolderOwnership $FolderPath
 
-            if(!$got_owner) {
-                Write-Error "Failed to take ownership of $FolderPath. Cannot apply FullControl."
-                return $false
-            }
 			$acl = Get-Acl $FolderPath
 			$acl.SetAccessRuleProtection($false, $false)  # disable inherited ACL protection if needed
 			$acl.AddAccessRule($rule)
@@ -159,20 +143,17 @@ function Grant-FolderFullControl() {
 					Set-Acl -Path $_.FullName -AclObject $acl
 				}
 				catch {
-                    Write-Host "$($_.FullName): Failed to apply FullControl. Error: $($_.Exception.Message)" -ForegroundColor Red
-                }
+					  }
 			}
-            return $true
 		}
 		catch {
-			Write-Error "Error applying ACLs to: $FolderPath"
-			Write-Error $_.Exception.Message
+			Write-Error "Error applying ACLs to: $FolderPath" -ForegroundColor Red
+			Write-Error $_.Exception.Message -ForegroundColor DarkRed
 		}
 	}
 	else{
 		Write-Host "$FolderPath Doesn't exist"
 	}
-    return $false
 }
 function EnableProcessTokenPrivilege {
     [CmdletBinding()]
@@ -234,7 +215,7 @@ function SearchMsiProductReg {
     $regpath = ToPSDriveFormat($REG_MSI_PRODUCT_KEY)
     #Normally we shouldn't get an empty string here, but let's check it just to be safe.
     if([string]::IsNullOrEmpty($regpath)) {
-        Write-Warning "Failed to convert registry path to PSDrive format: $REG_MSI_PRODUCT_KEY"
+        Write-Warn "Failed to convert registry path to PSDrive format: $REG_MSI_PRODUCT_KEY"
         return ""
     }
     $found = Get-Childitem -path $regpath | SELECT *
@@ -559,7 +540,7 @@ function RemoveAppStartupRun {
     Write-Host "Remove App [$Name] in Startup Run Registry starting..."
 
     foreach($path in $REG_STARTUP_RUN){
-        Write-Verbose "Removing Startup Run value [$Name] under [$path]"
+        Write-Verbose "Removing Startup Run value [$Name] under [$pspath]"
         RemoveRegistryValue -Path $path -ValueName $Name
     }
 }
@@ -587,18 +568,18 @@ function RemoveMSIRegistryForApp {
 
     #2. Search Components by ProductKey
     if(![string]::IsNullOrEmpty($product_code)) {
-        $components = SearchMsiComponentByProduct -ProductCode "$product_code"
+        $components = SearchMsiComponentByProduct -ProductKey "$product_code"
     }
     #3. Search UpgradeCode by ProductKey
     if(![string]::IsNullOrEmpty($product_code)) {
-        $upg_code = SearchUpgradeCodeByProduct -ProductCode "$product_code"
+        $upg_code = SearchUpgradeCodeByProduct -ProductKey "$product_code"
     }
     #4. Search Feature Tree by ProductKey
     if(![string]::IsNullOrEmpty($product_code)) {
-        $feature_tree = SearchFeatureTreeByProduct -ProductCode "$product_code"
+        $feature_tree = SearchFeatureTreeByProduct -ProductKey "$product_code"
     }
     #5. Search InstallClassKey by ProductName
-    $inst_class = SearchMsiInstClassProductCode -ProductName "$ProductName"
+    $inst_class = SearchMsiInstClassProductKey -ProductName "$ProductName"
     #6. Search Uninstall Keys by Product DisplayName
     $uninst_keys = SearchMsiUninstKeyByProduct -DisplayName "$DisplayName"
 
@@ -705,7 +686,7 @@ function SearchRegistryKeysByRegex {
 
                     if ($ValueNameRegex) {  
                         if ($Key.GetValueNames() -match $ValueNameRegex) {  
-                            Write-Verbose ("{0}: has value name matched ValueNameRegex" -f $Key)  
+                            Write-Verbose ("{0}: has value names matched ValueNameRegex" -f $Key)  
                             $counter++
                             return [string] $Key
                         }  
@@ -746,7 +727,6 @@ function SearchRegistryValuesByRegex {
     begin { 
         Write-Host "SearchRegistryValuesByRegex=> Path[$Path]"
         Write-Verbose "SearchRegex=$SearchRegex"
-        $counter = 0
     } 
 
     process { 
@@ -762,14 +742,13 @@ function SearchRegistryValuesByRegex {
                 ForEach-Object {   
                     $item = $_ 
                     $ret = ($item.PSObject.Properties | Where-Object {
-                        $_.Name -match $SearchRegex -or $_.Value -match $SearchRegex }).Name
-                    $counter++
+                            $_.Name -match $SearchRegex -or $_.Value -match $SearchRegex }).Name
                     return $ret
                 } 
         }
     } 
     end{
-        Write-Host "Total matched values: $counter"
+        Write-Host "Total matched values: $($ret.Count)"
     }
 }
 
