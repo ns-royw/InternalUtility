@@ -1,0 +1,34 @@
+===========================================================
+  PowerShell Launcher Script from Command Prompt
+  2025 Dec Roy Wang
+===========================================================
+
+For security reason, Windows restricts powershell script file launch policy.
+Usually we have to modify system config to change restriction policy.
+It's annoying and some users may not want to change this policy permanently.
+To solve this problem, I created these batch files to help run the powershell scripts.
+
+These batch files can help you launch powershell script file(*.ps1) in Command Prompt.
+
+1.run_signed.bat can run SIGNED powershell script files.
+
+2.run_unsigned.bat can run UNSIGNED powershell script files. 
+It overrides powershell restriction policy temporarily.
+No permanent modification applied! 
+
+[Prerequiste]
+To use these batch files, open a command prompt WITH ADMINISTRATOR privilege!!
+
+[Usage]
+run_signed.bat <fullpath of powershell> <arg1 to powershell> <arg2 to powershell>.....<arg8 to powershell>
+
+(Usage of run_unsigned.bat is the same)
+
+[Example]
+If I want to run c:\myscript\mytask.ps1 and assign -Verbose argument, use this command:
+run_signed.bat "c:\myscript\mytask.ps1" -Verbose
+
+(use double quote with fullpath to prevent space problem in path)
+
+[Reference]
+https://learn.microsoft.com/en-us/powershell/module/microsoft.powershell.core/about/about_execution_policies?view=powershell-7.5
