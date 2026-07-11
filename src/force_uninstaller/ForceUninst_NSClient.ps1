@@ -59,9 +59,11 @@ Import-Module $PSScriptRoot\ForceUninst_Lib.psm1 -Force     #psm1 module file sh
                                 "${env:ProgramFiles(x86)}\Netskope", 
                                 "$env:ProgramData\Netskope")
 [string] $NS_PROCESS_SVC = "stAgentSvc"
+[string] $NS_PROCESS_WATCHDOG = "stAgentSvcMon"
 [string] $NS_PROCESS_UI = "stAgentUI"
 [string] $NS_STARTUP_RUN_NAME = $NS_PROCESS_UI
 [string] $NS_SVC_STAGENTSVC = "stAgentSvc"
+[string] $NS_SVC_STWATCHDOG = "stWatchdog"
 [string] $NS_SVC_STADRV = "stadrv"
 [string] $NS_SVC_EPDLPSVC = "epdlp"
 [string] $NS_SVC_EPDLPDRV = "epdlpdrv"
@@ -177,13 +179,15 @@ if(-not $DryRun) {
     #stop service then kill service processes again. It is make sure the service is stopped before deleting the service and driver.
     Write-Host "Stopping NSClient services..."
     Stop-Service -Name $NS_SVC_STAGENTSVC -Force -ErrorAction SilentlyContinue
+    Stop-Service -Name $NS_SVC_STWATCHDOG -Force -ErrorAction SilentlyContinue
     Stop-Service -Name $NS_SVC_EPDLPSVC -Force -ErrorAction SilentlyContinue
     
     Write-Host "Killing NSClient processes..."
-    KillProcesses -ProcessNames @($NS_PROCESS_SVC, $NS_PROCESS_UI, $NS_SVC_EPDLPSVC)
+    KillProcesses -ProcessNames @($NS_PROCESS_SVC, $NS_PROCESS_UI, $NS_PROCESS_WATCHDOG, $NS_SVC_EPDLPSVC)
     
     Write-Host "Deleting NSClient services..."
     DeleteService -ServiceName $NS_SVC_STAGENTSVC -Force
+    DeleteService -ServiceName $NS_SVC_STWATCHDOG -Force
     DeleteService -ServiceName $NS_SVC_EPDLPSVC -Force
 
     Write-Host "Deleting NSClient drivers..."
