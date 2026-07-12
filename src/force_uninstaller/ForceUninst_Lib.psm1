@@ -141,7 +141,7 @@ function Grant-FolderFullControl() {
         "None",
         "Allow"
     )
-
+    $ret = $false
     Write-Host "`n=== Processing: $FolderPath ===" -ForegroundColor Magenta
 
     if(Test-Path $FolderPath)
@@ -160,33 +160,36 @@ function Grant-FolderFullControl() {
             Write-Host "Applied FullControl to $FolderPath folder." -ForegroundColor Green
 
             Get-ChildItem -LiteralPath $FolderPath -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                $current = $_.FullName
                 try {
-                    $current = $_.FullName
-                    $acl = Get-Acl $_.FullName
+                    Write-Verbose "Applying ACL rules to: $current"
+                    $acl = Get-Acl $current
                     if ($_.PSIsContainer) {
                         $acl.AddAccessRule($dir_rule)
                     }
                     else {
                         $acl.AddAccessRule($file_rule)
                     }
-                    Set-Acl -Path $_.FullName -AclObject $acl
+                    Set-Acl -Path $current -AclObject $acl
                 }
                 catch {
                     Write-Host "$current => Failed to apply FullControl. Error: $($_.Exception.Message)" -ForegroundColor Red
                 }
-			}
-            return $true
+            }
+            $ret = $true
         }
         catch {
             Write-Error "Error applying ACLs to: $FolderPath"
             Write-Error $_.Exception.Message
+            $ret = $false
         }
     }
     else{
         Write-Host "$FolderPath Doesn't exist"
+        $ret = $false
     }
     
-    return $false
+    return $ret
 }
 function EnableProcessTokenPrivilege {
     [CmdletBinding()]
@@ -528,6 +531,9 @@ function RemoveFolders {
 
             Write-Verbose "Removing folder: $path"
             Remove-Item -Path "$path" -Recurse -Force -ErrorAction SilentlyContinue
+        }
+        else {
+            Write-Host "Folder not found: $path , skipping..."
         }
     }
 }
