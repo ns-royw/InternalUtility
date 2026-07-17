@@ -1,21 +1,21 @@
 #Requires -RunAsAdministrator
 # =====================================================================
 # ENG-1108299  SSL ctx crash repro + fix verification script
-#   Repeatedly kill stAgentSvc, let the watchdog (stAgentSvcMon) bring it
-#   back up, check the handoff order after each restart, and watch for a
-#   crash dump.
+#   Loop: kill stAgentSvc -> poll every 1s until the watchdog
+#   (stAgentSvcMon) restarts it -> let it run 31s -> kill again.
+#   Repeat up to 1000 times. Stops early if a crash dump is produced.
 # =====================================================================
 $ErrorActionPreference = 'Continue'
 
 # ========= Configurable parameters =========
-$AgentSvc       = 'stAgentSvc'                             # main service name
-$WatchdogSvc    = 'stWatchdog'                             # watchdog service name (process is stAgentSvcMon.exe)
-$AgentImage     = 'stAgentSvc.exe'                         # main service process image
-$AgentProcName  = 'stAgentSvc'                             # for Get-Process (without .exe)
-$LogDir         = 'C:\ProgramData\netskope\stagent\Logs'  # dump and log directory
-$MaxCycles      = 1000                                     # max number of kill cycles
-$RestartWaitSec = 60                                       # max seconds to wait for watchdog restart per cycle
-$SettleSec      = 3                                        # seconds to wait for logs to be flushed after restart
+$AgentSvc         = 'stAgentSvc'                             # main service name
+$WatchdogSvc      = 'stWatchdog'                             # watchdog service name (process is stAgentSvcMon.exe)
+$AgentImage       = 'stAgentSvc.exe'                         # main service process image
+$AgentProcName    = 'stAgentSvc'                             # for Get-Process (without .exe)
+$LogDir           = 'C:\ProgramData\netskope\stagent\Logs'  # dump and log directory
+$MaxCycles        = 1000                                     # number of kill cycles
+$RunAfterStartSec = 61                                       # how long to let the agent run after it restarts, before killing again
+$RestartWaitSec   = 120                                      # safety cap for waiting for the watchdog restart (seconds)
 # ===========================================
 
 function Log([string]$msg, [string]$color = 'Gray') {
@@ -38,8 +38,8 @@ function Test-AgentProc {
     return ($null -ne (Get-Process -Name $AgentProcName -ErrorAction SilentlyContinue))
 }
 
-# Wait for the agent process to be brought back up by the watchdog.
-# While waiting, check for a dump every second and report immediately if found.
+# Poll every second until the agent process is back up.
+# Returns 'DUMP' (dump found), 'UP' (process detected), or 'TIMEOUT'.
 function Wait-AgentRestart([int]$timeoutSec) {
     for ($i = 0; $i -lt $timeoutSec; $i++) {
         if ((Get-Dumps).Count -gt 0) { return 'DUMP' }
@@ -47,6 +47,16 @@ function Wait-AgentRestart([int]$timeoutSec) {
         Start-Sleep -Seconds 1
     }
     return 'TIMEOUT'
+}
+
+# Sleep for N seconds, checking for a dump each second.
+# Returns 'DUMP' if a dump appears, otherwise 'DONE'.
+function Wait-Seconds-CheckDump([int]$sec) {
+    for ($i = 0; $i -lt $sec; $i++) {
+        if ((Get-Dumps).Count -gt 0) { return 'DUMP' }
+        Start-Sleep -Seconds 1
+    }
+    return 'DONE'
 }
 
 function Get-NewestLog {
@@ -121,44 +131,35 @@ if (-not $agentUp -or -not $wdUp) {
     return
 }
 
-# ---------- Steps 5 & 6 & 7: repeatedly kill, check handoff order after each restart, watch for dumps ----------
-Log "Steps 5/6/7: starting repeated kill of $AgentImage (up to $MaxCycles cycles) ..." 'Cyan'
+# ---------- Steps 5/6/7: kill -> poll 1s for restart -> run 31s -> kill again ----------
+Log "Steps 5/6/7: kill $AgentImage, poll 1s until restart, run ${RunAfterStartSec}s, repeat (up to $MaxCycles cycles) ..." 'Cyan'
 $found = $false
 $totalFail = 0
 for ($cycle = 1; $cycle -le $MaxCycles; $cycle++) {
 
-    # Check for a dump from the previous cycle before killing
-    if ((Get-Dumps).Count -gt 0) { $found = $true; break }
-
-    # If the agent is not running yet, wait for it to be brought back up
-    if (-not (Test-AgentProc)) {
-        $r = Wait-AgentRestart $RestartWaitSec
-        if ($r -eq 'DUMP')    { $found = $true; break }
-        if ($r -eq 'TIMEOUT') { Log "Cycle $cycle : timed out waiting for agent to start" 'Yellow'; continue }
+    # Step 5: kill stAgentSvc (if running)
+    if (Test-AgentProc) {
+        Log ("Cycle {0}: taskkill {1}" -f $cycle, $AgentImage)
+        taskkill /F /IM $AgentImage 2>$null | Out-Null
+    } else {
+        Log ("Cycle {0}: agent not currently running; nothing to kill" -f $cycle) 'Yellow'
     }
 
-    # Step 5: kill stAgentSvc
-    Log ("Cycle {0}: taskkill {1}" -f $cycle, $AgentImage)
-    taskkill /F /IM $AgentImage 2>$null | Out-Null
-
-    # Steps 6 + 7: check every second whether the watchdog restarts it, while watching for a dump
+    # Step 6: poll every second until the watchdog restarts the agent (checking dumps each second)
     $r = Wait-AgentRestart $RestartWaitSec
-    switch ($r) {
-        'DUMP' {
-            $found = $true
-        }
-        'UP' {
-            Log ("Cycle {0}: watchdog restarted $AgentImage" -f $cycle) 'Green'
-            Start-Sleep -Seconds $SettleSec          # wait for the new process to flush connection logs
-            if ((Get-Dumps).Count -gt 0) { $found = $true; break }
-            $f = Test-HandoverOrder (Get-NewestLog)  # <- approach A: check handoff order after each restart
-            if ($f -is [int]) { $totalFail += $f }
-        }
-        'TIMEOUT' {
-            Log ("Cycle {0}: watchdog did not restart the agent within {1}s (check $WatchdogSvc)" -f $cycle, $RestartWaitSec) 'Yellow'
-        }
+    if ($r -eq 'DUMP')    { $found = $true; break }
+    if ($r -eq 'TIMEOUT') {
+        Log ("Cycle {0}: watchdog did not restart the agent within {1}s (check $WatchdogSvc)" -f $cycle, $RestartWaitSec) 'Yellow'
+        continue
     }
-    if ($found) { break }
+    Log ("Cycle {0}: watchdog restarted $AgentImage" -f $cycle) 'Green'
+
+    # Step 7: let it run for 31s after startup, checking for a dump each second
+    if ((Wait-Seconds-CheckDump $RunAfterStartSec) -eq 'DUMP') { $found = $true; break }
+
+    # Verify handoff order for this connection cycle before killing again
+    $f = Test-HandoverOrder (Get-NewestLog)
+    if ($f -is [int]) { $totalFail += $f }
 }
 
 # ---------- Results ----------
