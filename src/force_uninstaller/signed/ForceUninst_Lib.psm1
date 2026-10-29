@@ -5,6 +5,10 @@
 # This script provides MSI-related registry handling and app uninstall functions. 
 # Its main purpose is to force-remove apps that have broken MSI information. 
 # Before using this script, you must check that it has a Netskope signature.
+#
+# Release History:
+# R0.7: 2025/Oct Roy Wang. first version
+# R0.8: 2026/Jul Roy Wang. bug fixing and refactoring
 
 #special notes:
 #"product key" is a special order of GUID reprentation used by MSI installer internally.
@@ -123,52 +127,69 @@ function Grant-FolderFullControl() {
     )
 
     $currentUser = "$env:USERDOMAIN\$env:USERNAME"
-    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+    $dir_rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
         $currentUser,
         "FullControl",
         "ContainerInherit,ObjectInherit",
         "None",
         "Allow"
     )
-
+    $file_rule = New-Object System.Security.AccessControl.FileSystemAccessRule(
+        $currentUser,
+        "FullControl",
+        "None",
+        "None",
+        "Allow"
+    )
+    $ret = $false
     Write-Host "`n=== Processing: $FolderPath ===" -ForegroundColor Magenta
 
-	if(Test-Path $FolderPath)
-	{
-		try {
-			$got_owner = Get-FolderOwnership $FolderPath
+    if(Test-Path $FolderPath)
+    {
+        try {
+            $got_owner = Get-FolderOwnership $FolderPath
 
             if(!$got_owner) {
                 Write-Error "Failed to take ownership of $FolderPath. Cannot apply FullControl."
                 return $false
             }
-			$acl = Get-Acl $FolderPath
-			$acl.SetAccessRuleProtection($false, $false)  # disable inherited ACL protection if needed
-			$acl.AddAccessRule($rule)
-			Set-Acl -Path $FolderPath -AclObject $acl
-			Write-Host "Applied FullControl to $FolderPath folder." -ForegroundColor Green
+            $acl = Get-Acl $FolderPath
+            $acl.SetAccessRuleProtection($false, $false)  # disable inherited ACL protection if needed
+            $acl.AddAccessRule($dir_rule)
+            Set-Acl -Path $FolderPath -AclObject $acl
+            Write-Host "Applied FullControl to $FolderPath folder." -ForegroundColor Green
 
-			Get-ChildItem -LiteralPath $FolderPath -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-				try {
-					$acl = Get-Acl $_.FullName
-					$acl.AddAccessRule($rule)
-					Set-Acl -Path $_.FullName -AclObject $acl
-				}
-				catch {
-                    Write-Host "$($_.FullName): Failed to apply FullControl. Error: $($_.Exception.Message)" -ForegroundColor Red
+            Get-ChildItem -LiteralPath $FolderPath -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
+                $current = $_.FullName
+                try {
+                    Write-Verbose "Applying ACL rules to: $current"
+                    $acl = Get-Acl $current
+                    if ($_.PSIsContainer) {
+                        $acl.AddAccessRule($dir_rule)
+                    }
+                    else {
+                        $acl.AddAccessRule($file_rule)
+                    }
+                    Set-Acl -Path $current -AclObject $acl
                 }
-			}
-            return $true
-		}
-		catch {
-			Write-Error "Error applying ACLs to: $FolderPath"
-			Write-Error $_.Exception.Message
-		}
-	}
-	else{
-		Write-Host "$FolderPath Doesn't exist"
-	}
-    return $false
+                catch {
+                    Write-Host "$current => Failed to apply FullControl. Error: $($_.Exception.Message)" -ForegroundColor Red
+                }
+            }
+            $ret = $true
+        }
+        catch {
+            Write-Error "Error applying ACLs to: $FolderPath"
+            Write-Error $_.Exception.Message
+            $ret = $false
+        }
+    }
+    else{
+        Write-Host "$FolderPath Doesn't exist"
+        $ret = $false
+    }
+    
+    return $ret
 }
 function EnableProcessTokenPrivilege {
     [CmdletBinding()]
@@ -199,24 +220,34 @@ function EnableProcessTokenPrivilege {
     internal const int SE_PRIVILEGE_ENABLED = 0x00000002;
     internal const int TOKEN_QUERY = 0x00000008;
     internal const int TOKEN_ADJUST_PRIVILEGES = 0x00000020;
-    public static void Enable(string privilege) {
+    public static bool Enable(string privilege) {
         IntPtr htoken = IntPtr.Zero;
-        OpenProcessToken(System.Diagnostics.Process.GetCurrentProcess().Handle,
+        bool ok1 = OpenProcessToken(System.Diagnostics.Process.GetCurrentProcess().Handle,
             TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, ref htoken);
         TOKEN_PRIVILEGES tp;
         tp.Count = 1;
         tp.Luid = 0;
         tp.Attr = SE_PRIVILEGE_ENABLED;
-        LookupPrivilegeValue(null, privilege, ref tp.Luid);
-        AdjustTokenPrivileges(htoken, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
+        bool ok2 = LookupPrivilegeValue(null, privilege, ref tp.Luid);
+        bool ok3 = AdjustTokenPrivileges(htoken, false, ref tp, 0, IntPtr.Zero, IntPtr.Zero);
+        return ok1 && ok2 && ok3;
     }
 }
 "@
     Add-Type $definition #-ErrorAction SilentlyContinue
 # Enable necessary privileges
-    [PrivilegeHelper]::Enable("SeTakeOwnershipPrivilege")
-    [PrivilegeHelper]::Enable("SeRestorePrivilege")
-    [PrivilegeHelper]::Enable("SeBackupPrivilege")
+    $action_ok = [PrivilegeHelper]::Enable("SeTakeOwnershipPrivilege")
+    if(!$action_ok) {
+        Write-Warning "Failed to enable SeTakeOwnershipPrivilege"
+    }
+    $action_ok = [PrivilegeHelper]::Enable("SeRestorePrivilege")
+    if(!$action_ok) {
+        Write-Warning "Failed to enable SeRestorePrivilege"
+    }
+    $action_ok = [PrivilegeHelper]::Enable("SeBackupPrivilege")
+    if(!$action_ok) {
+        Write-Warning "Failed to enable SeBackupPrivilege"
+    }
 }
 function SearchMsiProductReg {
     [CmdletBinding()]
@@ -247,7 +278,7 @@ function SearchMsiProductReg {
         }
         if($DisplayName -eq $values.DisplayName) {
             Write-Host "Product($DisplayName) registry => $regpath"
-            return "$($item.Name)\InstallProperties\"
+            return $($item.Name)
         }
     }
 }
@@ -501,6 +532,9 @@ function RemoveFolders {
             Write-Verbose "Removing folder: $path"
             Remove-Item -Path "$path" -Recurse -Force -ErrorAction SilentlyContinue
         }
+        else {
+            Write-Host "Folder not found: $path , skipping..."
+        }
     }
 }
 function RemoveRegistryKeys {
@@ -624,7 +658,7 @@ function RemoveMSIRegistryForApp {
     }
     Write-Host "CleanupMSIRegistry for Product [$DisplayName] done."
 }
-# Search registry keys by regex in key names, value names, and/or value data.
+# Search registry keys by regex in key names, value names, and value data.
 # If no switches are specified, all three (key names, value names, and value data) will be searched.
 # returns matching registry key paths as strings.
 #Note: this function only search 1 level of registry keys under the specified path(s).
@@ -652,7 +686,7 @@ function SearchRegistryKeysByRegex {
         [switch] $ValueData, 
         [Parameter(ParameterSetName="MultipleSearchStrings")] 
         # Specifies a regex that will be checked against key names only 
-        [string] $KeyNameRegex, 
+        [string] $KeyNameRegex,
         [Parameter(ParameterSetName="MultipleSearchStrings")] 
         # Specifies a regex that will be checked against value names only 
         [string] $ValueNameRegex, 
@@ -673,19 +707,22 @@ function SearchRegistryKeysByRegex {
                 # No extra work needed 
             } 
         }
-        Write-Host "SearchRegistryKeysByRegex=> Path[$Path]"
+        Write-Host "SearchRegistryKeysByRegex=> Path:"
+        foreach ($CurrentPath in $Path) { 
+            Write-Host "  [$CurrentPath]"
+        }
         Write-Verbose "SearchRegex=$SearchRegex, KeyNameRegex=$KeyNameRegex, ValueNameRegex=$ValueNameRegex, ValueDataRegex=$ValueDataRegex"
         $counter = 0
     } 
 
     process { 
         foreach ($CurrentPath in $Path) { 
-            Write-Verbose ("Searching in path: {0}" -f $CurrentPath)
             $pspath = ToPSDriveFormat($CurrentPath)
             #Normally we shouldn't get an empty string here, but let's check it just to be safe.
             if([string]::IsNullOrEmpty($pspath)) {
                 continue
             }
+            Write-Verbose ("=>{0}" -f $pspath)
 
             Get-ChildItem -Path "$pspath" -Recurse:$Recursive |  
                 ForEach-Object { 
@@ -699,21 +736,27 @@ function SearchRegistryKeysByRegex {
                         }  
                     } 
 
-                    if ($ValueNameRegex) {  
-                        if ($Key.GetValueNames() -match $ValueNameRegex) {  
-                            Write-Verbose ("{0}: has value name matched ValueNameRegex" -f $Key)  
+                    if ($ValueNameRegex) {
+                        $matchedNames = $Key.GetValueNames() | Where-Object { $_ -match $ValueNameRegex }
+                        if ($matchedNames) {
+                            foreach ($vname in $matchedNames) {
+                                Write-Verbose ("{0}: matched ValueNameRegex, {1} = {2}" -f $Key, $vname, $Key.GetValue($vname))
+                            }
                             $counter++
                             return [string] $Key
-                        }  
-                    } 
+                        }
+                    }
 
-                    if ($ValueDataRegex) {  
-                        if (($Key.GetValueNames() | % { $Key.GetValue($_) }) -match $ValueDataRegex) {  
-                            Write-Verbose ("{0}: value matched ValueDataRegex" -f $Key)
+                    if ($ValueDataRegex) {
+                        $matchedNames = $Key.GetValueNames() | Where-Object { $Key.GetValue($_) -match $ValueDataRegex }
+                        if ($matchedNames) {
+                            foreach ($vname in $matchedNames) {
+                                Write-Verbose ("{0}: matched ValueDataRegex, {1} = {2}" -f $Key, $vname, $Key.GetValue($vname))
+                            }
                             $counter++
                             return [string] $Key
-                        } 
-                    } 
+                        }
+                    }
                 } 
         } 
     } 
@@ -723,49 +766,81 @@ function SearchRegistryKeysByRegex {
     }
 }
 
-# Search registry keys by regex in value names, and/or value data.
+# Search registry keys by regex in value names, and value data.
 # If no switches are specified, all two (value names, and value data) will be searched.
 # returns matching value name as strings.
-function SearchRegistryValuesByRegex { 
+function SearchRegistryValueNamesByRegex { 
     [CmdletBinding()] 
     [OutputType([string[]])]
     param( 
         [Parameter(Mandatory, Position=0, ValueFromPipelineByPropertyName)] 
-        [Alias("PsPath")] 
         # Registry path to search 
         [string[]] $Path, 
-        # A regular expression that will be checked against key names, value names, and value data.
+        # A regular expression that will be checked against value names, and value data.
         # this argument also can be a keyword.
         [string] $SearchRegex
     ) 
 
     begin { 
-        Write-Host "SearchRegistryValuesByRegex=> Path[$Path]"
+        Write-Host "SearchRegistryValueNamesByRegex=> Path[$Path]"
         Write-Verbose "SearchRegex=$SearchRegex"
         $counter = 0
     } 
 
     process { 
-        foreach($CurrentPath in $Path) {
-            Write-Verbose ("Searching in path: {0}" -f $CurrentPath)
-            $pspath = ToPSDriveFormat($CurrentPath)
-            #Normally we shouldn't get an empty string here, but let's check it just to be safe.
-            if([string]::IsNullOrEmpty($pspath)) {
-                continue
-            }
+            foreach ($CurrentPath in $Path) {
+                if ([string]::IsNullOrEmpty($CurrentPath)) {
+                    Write-Warning "CurrentPath is empty, skipping..."
+                    continue
+                }
 
-            Get-ItemProperty -Path $pspath | 
-                ForEach-Object {   
-                    $item = $_ 
-                    $ret = ($item.PSObject.Properties | Where-Object {
-                        $_.Name -match $SearchRegex -or $_.Value -match $SearchRegex }).Name
-                    $counter++
-                    return $ret
-                } 
-        }
+                $pspath = ToPSDriveFormat($CurrentPath)
+                $key = Get-Item -Path "$pspath" -ErrorAction SilentlyContinue
+                if (!$key) {
+                    Write-Warning "Failed to get registry key for path: $CurrentPath"
+                    continue
+                }
+                $key.GetValueNames() | ForEach-Object {
+                    $vname = $_
+                    $vdata = $key.GetValue($vname)
+                    if($vname -match $SearchRegex -or $vdata -match $SearchRegex) {
+                        Write-Verbose ("found {0}={1} matched" -f $vname, $vdata)
+                        $counter++
+                        return [string] $vname
+                    }
+                }
+            }
     } 
     end{
         Write-Host "Total matched values: $counter"
+    }
+}
+
+# Get all child values (value names and value data) under a specified registry key.
+# Note: only search specified registry key path, no searching subkeys.
+function DoesRegistryKeyHasOnlyOneValue {
+    [CmdletBinding()] 
+    [OutputType([bool])]
+    param( 
+        [Parameter(Mandatory, Position=0, ValueFromPipelineByPropertyName)] 
+        # Registry path to search 
+        [string] $Path
+    ) 
+    begin { 
+        Write-Host "DoesRegistryKeyHasOnlyOneValue=> Path[$Path]"
+        $counter = 0
+    } 
+    process { 
+        $pspath = ToPSDriveFormat($Path)
+        $key = Get-Item -Path "$pspath" -ErrorAction SilentlyContinue
+        if (!$key) {
+            Write-Warning "Failed to get registry key for path: $Path"
+            return $false
+        }
+        return $key.GetValueNames().Count -eq 1
+    }
+
+    end{
     }
 }
 
@@ -776,8 +851,8 @@ Export-ModuleMember -Variable *
 # SIG # Begin signature block
 # MIIwewYJKoZIhvcNAQcCoIIwbDCCMGgCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCCdsqUPzSyYSmGi
-# jhXsvAzc4EmSGnAIkpIKhW0F5bVJJ6CCDsswggboMIIE0KADAgECAhB3vQ4Ft1kL
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDCrQLouIRQRCX6
+# PRVtGoetlKg0DdxbwQzn1fnIjFjsDaCCDsswggboMIIE0KADAgECAhB3vQ4Ft1kL
 # th1HYVMeP3XtMA0GCSqGSIb3DQEBCwUAMFMxCzAJBgNVBAYTAkJFMRkwFwYDVQQK
 # ExBHbG9iYWxTaWduIG52LXNhMSkwJwYDVQQDEyBHbG9iYWxTaWduIENvZGUgU2ln
 # bmluZyBSb290IFI0NTAeFw0yMDA3MjgwMDAwMDBaFw0zMDA3MjgwMDAwMDBaMFwx
@@ -861,22 +936,22 @@ Export-ModuleMember -Variable *
 # biBHQ0MgUjQ1IEVWIENvZGVTaWduaW5nIENBIDIwMjACDAfAcTao81JOF/v0qzAN
 # BglghkgBZQMEAgEFAKB8MBAGCisGAQQBgjcCAQwxAjAAMBkGCSqGSIb3DQEJAzEM
 # BgorBgEEAYI3AgEEMBwGCisGAQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqG
-# SIb3DQEJBDEiBCBPBmVFuwVZwkTiRqqCiqm6P9jNBQWN02aunrB98StXhDANBgkq
-# hkiG9w0BAQEFAASCAgBRmb06dB1BsWyYSF5u5b0XkoJ1W5RXTR56Sjz6NAe1fuex
-# blbsWK2xRewf87hm41WSbwx5eveUm88D+mQSmnLl7QdHsJcef8nnWL4jfpLhgDYq
-# 26xp0k/pwG5RsYPML9kaEz6tnvg9pQ7ej4+jIZpeC8IEaIFS3HFebS9HWNPN/Rgx
-# z13EHkGogXKEvaPxfl9aqr8P9ebv/QBT4QECrjc9LbSf+nkdIOk96PADyr7YYQTS
-# XQrQLuNuaEGzXuEMvIBIWXefGs7BSlRUREqOoP9yz0kpwljoCMiMAZhFjKDpxaYH
-# 1UjPIlnOMne7qULy3FoVksY2eMfneTdkQNclEOyX+EyRVq4Ki9wnXBJ2BMZEbA9Q
-# npmgU8hzRWVXJ2qDj+xpHWLXtlFB6quj9geDjASRzA0EKN/vwZnl5Cqaserh3Jfc
-# nljUwDjVJEzZOuDyMlRtNp/KjKsKFdl+GvCxzZSZHmxFVWILkfke0n9/+VbGRw9J
-# Pj0c81R3Kknpn80UoRqzwqQOGo6rs2kZi+lZ4UMaT22BInNaWZZ4fYv9HqYXbR7H
-# ztdcyPM1oOoD34wfETlspHAtGxt1JUncR6kCL+5oin0ZEubwYlR/oud9Riw4Hxlp
-# tUB+O3110KCuZzTjp8lJ2tN+0UTY0g69WwD4+jmI69bavMixNqkuVylgC5q8SaGC
+# SIb3DQEJBDEiBCCPWYF5qxos+FYG+B170K15FDAMxHKMX/W+xBjlsaEHmDANBgkq
+# hkiG9w0BAQEFAASCAgDDPkpSEYOH3tAY1R38D0ArHQxb/cBrPly42PkORLuLMkBk
+# Qrti/XG2Ye+HuBuooefxsxV6tnK8IC0w3JMthmtwnampOYuFejySP3cRu/6GRg82
+# GcLyQaLmutD6A4a+0h0XWjMaWMlyfHQ1qdDZvBdFsfM8Oh1+4fFKAK0ZTy7NdkGt
+# XXGBLTAUMjUD+PNa3O6L+Oj/RgXl2/nhbL8Tkdc2qYjyOfYw/LpRJZvdqFaUe06f
+# PZ2TnAOb/J4phc+smle3zASCeBYuOoa9L1DfqWvTTcCqYuWI9/0PJEjPiEHaD4po
+# C2VQ/AdFEKGgDG6QQCM+9FtRVz823I0byAPQeZI6502fqSkpoZUhwSJWEZdL33xQ
+# GHUY54kcbvRSFWrKkIG/EliK0X09zG6qKkWSy+Rr0NzHuvMqHNqfRcdqw9HLpO+r
+# 7bEy8qPYFGSOYGh7C4vn6YbQv/g9HXaS7BKL9vLYMwkFk20pkvTBsB0cBj8R/QPA
+# /9FQJskNeLz15RPNYDKBjPrNE+ZSiyCZhcFdP5skKnHmeU+CN2Mo1OyNmuz8YG9E
+# yg+bygoFOyHryyTCs4rfeioRorFiu61UgZD30ZBtFlh1910VAhC4XSznFhkPu4SD
+# Rp32eMHmcwCHDo1Dz8efMbMRnxErG5ui3xs9+zMF+NWiVXbGTxYH5WyLhcQKYqGC
 # He0wgh3pBgorBgEEAYI3AwMBMYId2TCCHdUGCSqGSIb3DQEHAqCCHcYwgh3CAgED
 # MQ0wCwYJYIZIAWUDBAICMIHkBgsqhkiG9w0BCRABBKCB1ASB0TCBzgIBAQYLKwYB
-# BAGgMgIDAgIwMTANBglghkgBZQMEAgEFAAQgp+VC5KVhJiPvd+GJJETqXYKQoadm
-# IMK6o4f0mZZv1bUCFDFTVh7nD02Mg9rUnp/eIxpZ3rnqGA8yMDI2MDcwODEzMjMz
+# BAGgMgIDAgIwMTANBglghkgBZQMEAgEFAAQgt0e1IvXaK5yk2Yk1xqXKPV0uplL8
+# 3g9HMT8cQu7oxsACFC0aQuaZu+JbBef9574GFExA1XNwGA8yMDI2MTAyOTA1MjQx
 # MFowAwIBAaBdpFswWTELMAkGA1UEBhMCQkUxGTAXBgNVBAoTEEdsb2JhbFNpZ24g
 # bnYtc2ExLzAtBgNVBAMTJkdsb2JhbHNpZ24gUjQ1IFRTQSBmb3IgQ29kZVNpZ24g
 # MjAyNTEwoIIZYDCCBoowggRyoAMCAQICEQCEcj/BlcwW8dsrovZg3yvkMA0GCSqG
@@ -1019,18 +1094,18 @@ Export-ModuleMember -Variable *
 # YWxTaWduIE9mZmxpbmUgUjQ1IFRpbWVzdGFtcGluZyBDQSAyMDI1AhEAhHI/wZXM
 # FvHbK6L2YN8r5DALBglghkgBZQMEAgKgggFBMBoGCSqGSIb3DQEJAzENBgsqhkiG
 # 9w0BCRABBDArBgkqhkiG9w0BCTQxHjAcMAsGCWCGSAFlAwQCAqENBgkqhkiG9w0B
-# AQwFADA/BgkqhkiG9w0BCQQxMgQwhkWLS4IqcygCPfd6vDumEEHB+9a+wZ6UtqAt
-# mKaHgZPy9yFFhIC7b+i8wdLnJADCMIG0BgsqhkiG9w0BCRACLzGBpDCBoTCBnjCB
+# AQwFADA/BgkqhkiG9w0BCQQxMgQwhPHyEgTP79Aiy5pJuH8Kt+jFsTOs4krUbTQ4
+# 2vyO/0YYKTHmo7lU9XKn2ZiijRRzMIG0BgsqhkiG9w0BCRACLzGBpDCBoTCBnjCB
 # mwQggyrXLlI/3qyD+kaUvOfGzCYXZIgoZlZliMityjqDhVEwdzBipGAwXjELMAkG
 # A1UEBhMCQkUxGTAXBgNVBAoTEEdsb2JhbFNpZ24gbnYtc2ExNDAyBgNVBAMTK0ds
 # b2JhbFNpZ24gT2ZmbGluZSBSNDUgVGltZXN0YW1waW5nIENBIDIwMjUCEQCEcj/B
-# lcwW8dsrovZg3yvkMA0GCSqGSIb3DQEBDAUABIIBgETHmfSnKj+PboA3cOKuoRSq
-# jb6RSLAtcGFjtN1/FHe/7uTWum0+GvfqIccJ/C+z3TYIEVMoNB7dmguStcuSq88W
-# 4d7bZ7tSuq8nt35zefI/KWhYQI+QoGeC5rPtJSPpgAFnf9A+7LgZyKcH8KgeHkrR
-# lzFHcJlbjil9jUcZbAy2EqZN2uSCrXSs9Ax90L+kUfJPyqlPHNnl0yat8aN9UcxN
-# K2D35E3fpPIA7R39EUWT1f5JAxaZnEs/4/PXfVT+YALp3ZAOZPUyFsNvXc8vrlTA
-# 7bKvHR/Q8xLcnxO7psK96LfrSZfocx7+VUxuQ0P8pULfmGrMIiQeZpi2vs0ZfeIo
-# Mo2C+kr33Tfo6l3/BKZQ2QVwT6vaH/53PCC7BOaeRbO0Pr5ghMRwcvl4+x3mjLBb
-# XfsNuJE6mS9iZnw4SzEL0JANwmeXGzMQKQzBOTmxNlfudcUAZLBVK2gegh5Dg9N1
-# 6FupX0mo1+foKIG72y+LS7aWZMrml7mjjrkFFdcZ6g==
+# lcwW8dsrovZg3yvkMA0GCSqGSIb3DQEBDAUABIIBgAXOtUEq0DGdCGP8bRDdnVTC
+# IfSM/MutnoldjIFe7NxPbCQRR6hYZ2wFoy/0/vTBv7UIvl08wpjiMcmss/HIC0er
+# ArSQRMFQA8uhpD6Ht7qJkTUCjK0tkAkdvVBj0rbV7c+gP0RWtevCwTx8Ktj3zTtw
+# tha65AIR9GUA5kbynwE+4tF9w/7f4llCJ/iORGDeNRWYOk7S3zpBobCAasac/xRo
+# HyczV5EQwfyX4x9yi8QxJw9wySKWMinPZNBgJqmdsJoIRv+1vWs/WJXS5Oy6yJmU
+# cm+sUSLYz4tGahjzKSjeyU+5p6+yWMmlI53ejyYfPiHrmFr7UaXLD9WDqDkD9KO8
+# U/zieKrf1pzvkIGhrvr2Ba0N+HefhYIeQR6Rymm/Ke5ravfK3KIHXp9EvzIt7g6e
+# zrg4n2bfpnChZW7bo79+OS7JBjGfD8DeoF/kuzPpEY02b1HlPqW7HRSyxItVQgl9
+# 0GtU2DHKHIpbSRKeo9VD+ewYj45+UlcTIjQjqQxjyw==
 # SIG # End signature block

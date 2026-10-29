@@ -24,6 +24,11 @@
 #2. This script only support Windows PowerShell 5.0 and above. (Win10 has built-in PS v5.1)
 #3. When SelfProtection is enabled, executing this script twice would delete service/driver entry but files left.
 
+# Release History:
+# R0.7: 2025/Oct Roy Wang. first version
+# R0.8: 2026/Jul Roy Wang. bug fixing and refactoring
+
+
 param(
     [switch] $Verbose,
     [switch] $DryRun,       #only display target registry keys, values, folders, services, drivers, processes to be removed. Do not actually remove them.
@@ -49,20 +54,22 @@ Import-Module $PSScriptRoot\ForceUninst_Lib.psm1 -Force     #psm1 module file sh
                                     "HKEY_LOCAL_MACHINE\SOFTWARE\WOW6432Node\NetSkope", 
                                     "HKEY_CURRENT_USER\SOFTWARE\NetSkope")
 [string[]] $NS_INSTDIR_KEYWORDS = @("\\Netskope") #@("\\Netskope\\STAgent\\", "\\Netskope\\EPDLP", "\\Netskope")
-[string[]] $NS_COMPONENT_PATH_KEYWORDS = $NS_INSTDIR_KEYWORDS
+[string[]] $NS_COMPONENT_PATH_KEYWORDS = $NS_INSTDIR_KEYWORDS + @("Run\\stAgentUI")
 [string[]] $INSTALL_FOLDERS = @("$env:ProgramFiles\Netskope", 
                                 "${env:ProgramFiles(x86)}\Netskope", 
                                 "$env:ProgramData\Netskope")
 [string] $NS_PROCESS_SVC = "stAgentSvc"
+[string] $NS_PROCESS_WATCHDOG = "stAgentSvcMon"
 [string] $NS_PROCESS_UI = "stAgentUI"
 [string] $NS_STARTUP_RUN_NAME = $NS_PROCESS_UI
 [string] $NS_SVC_STAGENTSVC = "stAgentSvc"
+[string] $NS_SVC_STWATCHDOG = "stWatchdog"
 [string] $NS_SVC_STADRV = "stadrv"
 [string] $NS_SVC_EPDLPSVC = "epdlp"
 [string] $NS_SVC_EPDLPDRV = "epdlpdrv"
 
 $RegKeysToRemove = @()
-$RegValuesToRemove = @()
+$InstFolderRegValuesToRemove = @()
 $ProductReg = ""
 $ProductCode = ""
 
@@ -89,13 +96,13 @@ else {
 
 Write-Host "Scanning MSI Install Folders Registry Values"
 foreach ($keyword in $NS_INSTDIR_KEYWORDS) {
-    SearchRegistryValuesByRegex -Path $REG_MSI_INSTALL_FOLDERS_KEY -SearchRegex $keyword | 
+    SearchRegistryValueNamesByRegex -Path $REG_MSI_INSTALL_FOLDERS_KEY -SearchRegex $keyword | 
     ForEach-Object {
         $item = $_
         if([string]::IsNullOrEmpty($item)){
             return
         }
-        $RegValuesToRemove += $item
+        $InstFolderRegValuesToRemove += $item
     }
 }
     
@@ -172,20 +179,22 @@ if(-not $DryRun) {
     #stop service then kill service processes again. It is make sure the service is stopped before deleting the service and driver.
     Write-Host "Stopping NSClient services..."
     Stop-Service -Name $NS_SVC_STAGENTSVC -Force -ErrorAction SilentlyContinue
+    Stop-Service -Name $NS_SVC_STWATCHDOG -Force -ErrorAction SilentlyContinue
     Stop-Service -Name $NS_SVC_EPDLPSVC -Force -ErrorAction SilentlyContinue
     
     Write-Host "Killing NSClient processes..."
-    KillProcesses -ProcessNames @($NS_PROCESS_SVC, $NS_PROCESS_UI, $NS_SVC_EPDLPSVC)
+    KillProcesses -ProcessNames @($NS_PROCESS_SVC, $NS_PROCESS_UI, $NS_PROCESS_WATCHDOG, $NS_SVC_EPDLPSVC)
     
     Write-Host "Deleting NSClient services..."
     DeleteService -ServiceName $NS_SVC_STAGENTSVC -Force
+    DeleteService -ServiceName $NS_SVC_STWATCHDOG -Force
     DeleteService -ServiceName $NS_SVC_EPDLPSVC -Force
 
     Write-Host "Deleting NSClient drivers..."
     StopDriver -DriverSvcName $NS_SVC_STADRV 
-    DeleteDriver -ServiceName $NS_SVC_STADRV 
+    DeleteDriver -ServiceName $NS_SVC_STADRV -Force
     StopDriver -DriverSvcName $NS_SVC_EPDLPDRV 
-    DeleteDriver -ServiceName $NS_SVC_EPDLPDRV 
+    DeleteDriver -ServiceName $NS_SVC_EPDLPDRV -Force
 
     EnableProcessTokenPrivilege
 
@@ -193,6 +202,16 @@ if(-not $DryRun) {
     RemoveFolders -PathList $INSTALL_FOLDERS -TakeOwner
     RemoveRegistryKeys -PathList $REG_NSCLIENT_INSTALL 
     RemoveAppStartupRun -Name $NS_STARTUP_RUN_NAME 
+
+    Write-Host "Removing Collected Registry Keys"
+    foreach ($regKey in $RegKeysToRemove) {
+        RemoveRegistryKey -Path $regKey
+    }
+
+    Write-Host "Removing Collected Registry Values from $REG_MSI_INSTALL_FOLDERS_KEY"
+    foreach ($valueName in $InstFolderRegValuesToRemove) {
+        RemoveRegistryValue -Path "$REG_MSI_INSTALL_FOLDERS_KEY" -ValueName "$valueName"
+    }
 }
 else{
     Write-Host "[DryRun]Killing NSClient processes: $NS_PROCESS_SVC, $NS_PROCESS_UI, $NS_SVC_EPDLPSVC"
@@ -202,58 +221,45 @@ else{
     Write-Host "[DryRun]Removing Install Folders: `n$($INSTALL_FOLDERS -join "  `n")"
     Write-Host "[DryRun]Removing Registry Keys: `n$($REG_NSCLIENT_INSTALL -join "  `n")"
     Write-Host "[DryRun]Removing Startup Run Entry: $NS_STARTUP_RUN_NAME"
-}
 
-if(-not $DryRun) {
-    Write-Host "Removing Collected Registry Keys"
+    Write-Host "[DryRun]Removing Collected Registry Keys:"
     foreach ($regKey in $RegKeysToRemove) {
-        RemoveRegistryKey -Path $regKey
+        Write-Host "  =>$regKey"
     }
 
-    Write-Host "Removing Collected Registry Values from $REG_MSI_INSTALL_FOLDERS_KEY"
-    foreach ($regValue in $RegValuesToRemove) {
-        RemoveRegistryValue -Path "$REG_MSI_INSTALL_FOLDERS_KEY" -ValueName "$regValue"
+    Write-Host "[DryRun]Removing Collected Registry Values from $REG_MSI_INSTALL_FOLDERS_KEY"
+    foreach ($valueName in $InstFolderRegValuesToRemove) {
+        Write-Host "  =>$valueName"
     }
+}
 
 #brute-force cleanup abandoned components
-    if ($BruteForce) {
-        Write-Host "Brute-Force Removing Abandoned MSI Components Registry Keys"
-        foreach ($keyword in $NS_COMPONENT_PATH_KEYWORDS) {
-            SearchRegistryKeysByRegex -Path $REG_MSI_COMPONENTS_KEY -SearchRegex $keyword | 
-                ForEach-Object {
-                    $item = $_
-                    if([string]::IsNullOrEmpty($item)){
-                        return
-                    }
-                    Write-Host "Abandoned Components Key=>$item"
-                    RemoveRegistryKey -Path $item
+if ($BruteForce) {
+    $log_prefix = ""
+    if($DryRun) {
+        $log_prefix = "[DryRun]"
+    }
+    Write-Host "$log_prefix Brute-Force Removing Abandoned MSI Components Registry Keys"
+    foreach ($keyword in $NS_COMPONENT_PATH_KEYWORDS) {
+        SearchRegistryKeysByRegex -Path $REG_MSI_COMPONENTS_KEY -SearchRegex $keyword | 
+            ForEach-Object {
+                $item = $_
+                if([string]::IsNullOrEmpty($item)){
+                    return
                 }
-        }
-    }
-}
-else {
-    Write-Host "[DryRun] Collected Registry Keys to be remove:"
-    foreach ($regKey in $RegKeysToRemove) {
-        Write-Host "  => $regKey"
-    }
-    
-    Write-Host "[DryRun] Collected Registry Values from $REG_MSI_INSTALL_FOLDERS_KEY to be removed"
-    foreach ($regValue in $RegValuesToRemove) {
-        Write-Host "  => $regValue from $REG_MSI_INSTALL_FOLDERS_KEY"
-    }
 
-    if ($BruteForce) {
-        Write-Host "[DryRun]Brute-Force Removing Abandoned MSI Components Registry Keys"
-        foreach ($keyword in $NS_COMPONENT_PATH_KEYWORDS) {
-            SearchRegistryKeysByRegex -Path $REG_MSI_COMPONENTS_KEY -SearchRegex $keyword | 
-                ForEach-Object {
-                    $item = $_
-                    if([string]::IsNullOrEmpty($item)){
-                        return
+                # check if the registry key has only one value, if yes, it is considered abandoned and can be removed.
+                $is_abandoned = DoesRegistryKeyHasOnlyOneValue -Path $item
+                if($is_abandoned) {
+                    Write-Host "$log_prefix Abandoned Components Key=>$item"
+                    if(!$DryRun) {
+                        RemoveRegistryKey -Path $item
                     }
-                    Write-Host "[DryRun]Abandoned Components Key=>$item"
                 }
-        }
+                else { 
+                    Write-Host "$log_prefix Components Key=>$item (has more than 1 value, not removing)"
+                }
+            }
     }
 }
 
@@ -262,8 +268,8 @@ Write-Host "NSClient Force Uninstallation Completed. Please reboot the system to
 # SIG # Begin signature block
 # MIIwewYJKoZIhvcNAQcCoIIwbDCCMGgCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAN3fbzyJg0zZkS
-# d8pf/xr5AsI0cGrWMsxCyhLUemHLFaCCDsswggboMIIE0KADAgECAhB3vQ4Ft1kL
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAPImV+Aj0V8Ff5
+# D10jr7NtLPD2aOOQOry0T8+PpM+ygKCCDsswggboMIIE0KADAgECAhB3vQ4Ft1kL
 # th1HYVMeP3XtMA0GCSqGSIb3DQEBCwUAMFMxCzAJBgNVBAYTAkJFMRkwFwYDVQQK
 # ExBHbG9iYWxTaWduIG52LXNhMSkwJwYDVQQDEyBHbG9iYWxTaWduIENvZGUgU2ln
 # bmluZyBSb290IFI0NTAeFw0yMDA3MjgwMDAwMDBaFw0zMDA3MjgwMDAwMDBaMFwx
@@ -347,23 +353,23 @@ Write-Host "NSClient Force Uninstallation Completed. Please reboot the system to
 # biBHQ0MgUjQ1IEVWIENvZGVTaWduaW5nIENBIDIwMjACDAfAcTao81JOF/v0qzAN
 # BglghkgBZQMEAgEFAKB8MBAGCisGAQQBgjcCAQwxAjAAMBkGCSqGSIb3DQEJAzEM
 # BgorBgEEAYI3AgEEMBwGCisGAQQBgjcCAQsxDjAMBgorBgEEAYI3AgEVMC8GCSqG
-# SIb3DQEJBDEiBCCxCg2xC8Wuyp5IFnrri+NQJ3nA53k6YC9yEBhwwqMRLjANBgkq
-# hkiG9w0BAQEFAASCAgCXIkAHVDLkOVG+C4lQPEl9w/s/99drWatC0sWXcc5jjZEw
-# kSHW6YOw8h394xMB/cFgCVr/asnHW+P9O9U6ZKSxvCUEhFi/mxIWgOzzMfyJ4m+D
-# rvoWC6esCOxQU9qW4N/vATGoRcdJo9KGgz9UZ5/ViKnSZTLv+A10+DrBwJWb1w3a
-# 8X3hMzgxbU9aEQsiyR7au9EfOHQHYAz7nRWCYeMdnZ/d8FzeUylMLrX9+W0xYg+e
-# TsnaE8b9LVXRsROd1h7TsMUw+NeilJs8e4VLlsOe7QMvpXVttihU30EHVysUBgea
-# iB/ntRr6DnmDOaLccaGZSzfXa6dNjYdno108RAgW6hg3FyxEMF2sAguqOtUBAst4
-# jBLMGHG2fpFCgZdNn9ownliSvMJ/8HiMZs/pKyiv1WPfLC0I84b0facxD/aGQFyg
-# aEH7JTQw6lZ55JItUYXyTrtmiAlsKzyp9CVm7hqejjOd6zuUkdpbeSpR6Oh7r29z
-# ISZz86eo4R4IDyQ0O1hrKwF2j/0yTcmNMh01rze48J5kOgSa/g8RvN7x1bEcuxX+
-# uo/wFP2/V7FvF8/hLwkzPv9SFsK3xKmriGXUJtsmXgq6KSC3968MArb2M7WLtxzM
-# zA3ZJL9p4+UbUpbcVWqsf7TLxuXWMYldQsxDvgOFw6VjsQot0jV/caTY/o+hp6GC
+# SIb3DQEJBDEiBCARIfDMTozc2cUtf/p52LmEGPZP+wql01tu4NZJWlU33DANBgkq
+# hkiG9w0BAQEFAASCAgDKZAQeQN7MaQTRn0IEuK+0YxTR+88R3sA31nE4c7XsOAzy
+# MhDEq3L5Lud9j4b+RYqA1cFCxJgX6oMqFTarb4NyUNT744wo31wb+RzUOibJXv+8
+# el1wrDJizDDDloA5EUy7O62Y2cKdGfOPxzDahm1Q8N8hKhuQFLsLIlELTL0c04LV
+# TYKliIxMB+HeJOMNNFz7x18+iqgxG9BhpCohQ5wsQ5SvcWMmcTa6DjGrwJfUFK9A
+# fOxbGnJjELNpa8JD2RgYaXPkENFIL8jk6ZkwaKahU7wcucgYaSao6ejEeEehu1Ob
+# dumMrhCu7xjbDLoBKxT9KOxG5gw1UUWxzH2nolyPME+QvKV7tKt9IHNzPBtZr4h3
+# IRt4FBVX+5E27pDttOSp/2weYNXmKX0pvnbGiJHmj8psem3KXGB0XmTuP7t7hCx6
+# FBgwdZUPX3Ft/tkHubcE3O+S01SI0dmmzLCx1CqnDWoiJ/rZKQS7uwHkri10cneJ
+# FyEu8gBIyYXRYg/p3Wy+6Uj4m37WGyVmL7OBMPX4cDXlSf+BoDOQPuUdtfLqQHq1
+# MwrEBvXwagjry3GQyPU/AZHYTLRYZm8ibgmHkANax1NAnjtdtT0rPxhlJTxqWnmw
+# IPWKMdmhT88ICIf0h0NLbQ8VtLxEJ/yOSd7iLtrPdYbuuMVFn+jhXyE1q2kSV6GC
 # He0wgh3pBgorBgEEAYI3AwMBMYId2TCCHdUGCSqGSIb3DQEHAqCCHcYwgh3CAgED
 # MQ0wCwYJYIZIAWUDBAICMIHkBgsqhkiG9w0BCRABBKCB1ASB0TCBzgIBAQYLKwYB
-# BAGgMgIDAgIwMTANBglghkgBZQMEAgEFAAQgDF5HIDyUjXX1q+ex1CjahNkzYVz9
-# i7BNPE/Jdyg/84MCFC8pcaMrYKDB/2B2E1kJLKftU/xWGA8yMDI2MDcwODEzMjMz
-# M1owAwIBAaBdpFswWTELMAkGA1UEBhMCQkUxGTAXBgNVBAoTEEdsb2JhbFNpZ24g
+# BAGgMgIDAgIwMTANBglghkgBZQMEAgEFAAQgL7q5pEM1mvangDyv5R+q/nrK8f+c
+# IxcgDt3y/cv9tg0CFAgDKoO4KuBA87ZDp0Yw+0b3nQ8oGA8yMDI2MTAyOTA1MjQx
+# NFowAwIBAaBdpFswWTELMAkGA1UEBhMCQkUxGTAXBgNVBAoTEEdsb2JhbFNpZ24g
 # bnYtc2ExLzAtBgNVBAMTJkdsb2JhbHNpZ24gUjQ1IFRTQSBmb3IgQ29kZVNpZ24g
 # MjAyNTEwoIIZYDCCBoowggRyoAMCAQICEQCEcj/BlcwW8dsrovZg3yvkMA0GCSqG
 # SIb3DQEBDAUAMF4xCzAJBgNVBAYTAkJFMRkwFwYDVQQKExBHbG9iYWxTaWduIG52
@@ -505,18 +511,18 @@ Write-Host "NSClient Force Uninstallation Completed. Please reboot the system to
 # YWxTaWduIE9mZmxpbmUgUjQ1IFRpbWVzdGFtcGluZyBDQSAyMDI1AhEAhHI/wZXM
 # FvHbK6L2YN8r5DALBglghkgBZQMEAgKgggFBMBoGCSqGSIb3DQEJAzENBgsqhkiG
 # 9w0BCRABBDArBgkqhkiG9w0BCTQxHjAcMAsGCWCGSAFlAwQCAqENBgkqhkiG9w0B
-# AQwFADA/BgkqhkiG9w0BCQQxMgQwfct7VWh/EimMUtQRe7+3WI7UBNbH4TXNmnuw
-# nTfYNtJFwm5FVx6fMXMFJG4TPhZ0MIG0BgsqhkiG9w0BCRACLzGBpDCBoTCBnjCB
+# AQwFADA/BgkqhkiG9w0BCQQxMgQw3UOlNoxeOKI/0GAib+eEp+U+hoEN37yL/ULP
+# 05Ua2Wor93XHpS6YoYKeyGcqDT4uMIG0BgsqhkiG9w0BCRACLzGBpDCBoTCBnjCB
 # mwQggyrXLlI/3qyD+kaUvOfGzCYXZIgoZlZliMityjqDhVEwdzBipGAwXjELMAkG
 # A1UEBhMCQkUxGTAXBgNVBAoTEEdsb2JhbFNpZ24gbnYtc2ExNDAyBgNVBAMTK0ds
 # b2JhbFNpZ24gT2ZmbGluZSBSNDUgVGltZXN0YW1waW5nIENBIDIwMjUCEQCEcj/B
-# lcwW8dsrovZg3yvkMA0GCSqGSIb3DQEBDAUABIIBgEVIzgxNWSTyfRc8LZiz/ycr
-# OAqZvsyGPV+/+lviw07THeN+caq+TS57gTrp+RVGIuxXfh+Nlu/Xlx7aca0pXbfL
-# +Hpttm5OncO3gEuJlLVZ86v11FvlpScAWHS1RjncvrB5NWs8pDrIgmS5d8qEwX1/
-# JQ3Q5tWvMPtnoVhUCrY/rZHiCAUFeaYfopkEkAdtyE1Dsi+7N9vCMon2omrNSXr0
-# f8MQ0ZjN6+/qelgfaXbWyzP+vD1Wd4EiQk95aG3CLyunM49z4L8zz7A802cN83kL
-# ZwlgkGsAauxFUXCEISfB60bWjM5G34rvvZEHFI79onvEhKsrOsnMI5jmjM3InOEa
-# Dcvz5yC/ci5WSYVnD+C2Gmk5lR9OsdrrTUwVLmoN2VuAgGx/kG2B/6NAYWlZcPNH
-# rMyXg8povOolu6ixxOn8QgWusEb/VWByRZuQSVSXlEo+t49W8r9tmP3u2dAbJsFm
-# CHl2I33iWVl8QAdxu8n2wlb3JKImRbfWIDiOxJSQsQ==
+# lcwW8dsrovZg3yvkMA0GCSqGSIb3DQEBDAUABIIBgIXHPmpXN53RpylF8Mnx9uVU
+# 1ISjztBSbtb4H5odaP0ACGxW5phvBTM95rkho5jQmOJrD/fx7piYP/MkXiEh8J9f
+# LwCRRsPRZMWkd7nuCZi7lewZ3gbW/QEFKPZbBC4N1NqNFmjn/DUo90CslchmKegz
+# vvGE8GtwyFXIIJ09wqucLqmTD54mQ1vTWafvHEftHY4A+AlCJeKRkL+mcnQ7QkAA
+# vHH1/f50AhcEQ3YDK89qbPetRz1UbcnlUPJWiAj2K0OebR4/5LTByLnKSo51krip
+# XERhgnyRJyE2x7E+vwr4wUGEpSZtx19kVxhqXR9pgstLP2x43y4ehCm5Fo97+2HI
+# c5MccUB+1NRG9gNySOV7mtTGscl/vkQbTX2owdz6jhh8f6msEangX+UdmwdvMJ6t
+# yfBL2c5BAODiAC/etnEefUfc8I6VuCAQfqaUAs5r24iTdkiz1tCdQTFQzwcynoi3
+# oX3YaluPLgf3woEzRvd/EJNdhsxoBImk/IfIrppuMA==
 # SIG # End signature block
