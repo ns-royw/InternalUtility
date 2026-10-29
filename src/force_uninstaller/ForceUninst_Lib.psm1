@@ -278,7 +278,7 @@ function SearchMsiProductReg {
         }
         if($DisplayName -eq $values.DisplayName) {
             Write-Host "Product($DisplayName) registry => $regpath"
-            return "$($item.Name)\InstallProperties\"
+            return $($item.Name)
         }
     }
 }
